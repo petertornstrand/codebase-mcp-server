@@ -1,0 +1,24 @@
+{
+    "name": "petertornstrand/codebase-mcp-server",
+    "description": "Stand-alone MCP server for Codebase HQ.",
+    "version": "1.0.0",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": "^8.3",
+        "ext-curl": "*",
+        "ext-json": "*",
+        "ext-mbstring": "*"
+    },
+    "autoload": {
+        "classmap": [
+            "src/"
+        ]
+    },
+    "bin": [
+        "build/codebase-mcp-server.phar"
+    ],
+    "config": {
+        "sort-packages": true
+    }
+}
