@@ -48,16 +48,16 @@ Context Protocol (MCP)_ with the following config:
 {
   "mcpServers": {
     "codebase": {
-      "command": "codebase-mcp-server.phar",
+      "command": "./bin/codebase-mcp-server.phar",
       "env": {
-        "CODEBASE_USERNAME": "",
-        "CODEBASE_API_KEY": "",
-        "CODEBASE_PROJECT": ""
+        "CODEBASE_USERNAME": "<CODEBASE_USERNAME>",
+        "CODEBASE_API_KEY": "<CODEBASE_API_KEY>",
+        "CODEBASE_PROJECT": "<CODEBASE_PROJECT>"
       }
     }
   }
 }
 ```
 
-Also set the correct working directory (location of `codebase-mcp-server.phar`
-file) and server level (project).
+Also set the correct working directory (location of this repository) and server
+level (project).
