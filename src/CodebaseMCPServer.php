@@ -30,7 +30,7 @@ class CodebaseMCPServer {
     private ?string $baseUrl = null,
   ) {
     // If no environment variable for API base URL is set use a default.
-    if ($baseUrl) {
+    if (!is_null($baseUrl)) {
       $this->baseUrl = rtrim($baseUrl, '/');
     }
     else {
@@ -66,10 +66,14 @@ class CodebaseMCPServer {
   private function handleRequest(array $request): array {
     $method = $request['method'] ?? '';
     $params = $request['params'] ?? [];
-    $project = $params['project'] ?? $this->project ?? '';
+    $project = $params['project'] ?? $this->project;
     $id = $request['id'] ?? null;
 
     try {
+      if ($params['name'] !== 'list_projects' && is_null($project)) {
+        throw new \Exception('Missing required argument: project. Either set environment variable CODEBASE_PROJECT or pass argument to tool.');
+      }
+
       $result = match ($method) {
         'initialize' => $this->initialize(),
         'tools/list' => $this->listTools(),
@@ -113,7 +117,7 @@ class CodebaseMCPServer {
       ],
       'serverInfo' => [
         'name' => 'codebase-hq-mcp-server',
-        'version' => '1.0.0',
+        'version' => '1.0.1',
       ]
     ];
   }
@@ -313,7 +317,7 @@ class CodebaseMCPServer {
       'get_ticket_categories' => $this->apiGet("/{$project}/tickets/categories"),
       'get_ticket_types' => $this->apiGet("/{$project}/tickets/types"),
       'create_ticket' => $this->apiPost("/{$project}/tickets", ['ticket' => $args]),
-      'update_ticket' => $this->apiPost("/{$project}/tickets/{$args['ticket_id']}/notes", $this->buildTicketNotePayload($args)),
+      'update_ticket' => $this->apiPost("/{$project}/tickets/{$args['ticket_id']}/notes", $this->buildTicketNotePayload($project, $args)),
       'get_milestones' => $this->apiGet("/{$project}/milestones"),
       'get_project_activity' => $this->apiGet("/{$project}/activity"),
       'get_project_users' => $this->apiGet("/{$project}/assignments"),
@@ -336,6 +340,8 @@ class CodebaseMCPServer {
    * Resolves human-readable names (status, priority, etc.) to their internal
    * IDs.
    *
+   * @param string $project
+   *   The project permalink.
    * @param array $args
    *   The arguments containing ticket update information.
    *
@@ -344,12 +350,7 @@ class CodebaseMCPServer {
    *
    * @throws \Exception
    */
-  private function buildTicketNotePayload(array $args): array {
-    $project = $this->project ?? $args['project'] ?? null;
-    if (is_null($project)) {
-      throw new \Exception('Missing required argument: project. Either set environment variable CODEBASE_PROJECT or pass argument to tool.');
-    }
-
+  private function buildTicketNotePayload(string $project, array $args): array {
     $ticketNote = [
       'content' => (string) ($args['content'] ?? ''),
     ];

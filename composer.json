@@ -1,7 +1,7 @@
 {
     "name": "petertornstrand/codebase-mcp-server",
     "description": "Stand-alone MCP server for Codebase HQ.",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "type": "project",
     "license": "MIT",
     "require": {
