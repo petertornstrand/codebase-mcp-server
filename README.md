@@ -66,4 +66,4 @@ Context Protocol (MCP)_ with the following config:
 ```
 
 Also set the correct working directory (location of this repository) and server
-level (project).
+level (project or global).
