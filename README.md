@@ -4,6 +4,8 @@ Stand-alone MCP server for [Codebase HQ](https://www.codebasehq.com/).
 
 The MCP server provides the following tools:
 
+* List projects
+* Get project
 * List tickets
 * Get ticket
 * Get ticket notes
@@ -32,12 +34,16 @@ Start the server by executing the following command:
 ```bash
 CODEBASE_USERNAME='<CODEBASE_USERNAME>' \
 CODEBASE_API_KEY='<CODEBASE_API_KEY>' \
-CODEBASE_PROJECT='<CODEBASE_PROJECT>' \
 ./build/codebase-mcp-server.phar
 ```
 
-You can also set the environment variable `CODEBASE_API_URL` which defaults to
-`https://api3.codebasehq.com/`.
+Optional environment variables:
+
+* `CODEBASE_PROJECT`: The permalink of a project. Settings this variable means
+   you will not have to pass the project as an argument to the tools.
+* `CODEBASE_API_URL`: If you for some reason want to use another base URL than
+  the default; `https://api3.codebasehq.com`.
+
 
 ## IDE Integration
 
@@ -51,8 +57,7 @@ Context Protocol (MCP)_ with the following config:
       "command": "./bin/codebase-mcp-server.phar",
       "env": {
         "CODEBASE_USERNAME": "<CODEBASE_USERNAME>",
-        "CODEBASE_API_KEY": "<CODEBASE_API_KEY>",
-        "CODEBASE_PROJECT": "<CODEBASE_PROJECT>"
+        "CODEBASE_API_KEY": "<CODEBASE_API_KEY>"
       }
     }
   }

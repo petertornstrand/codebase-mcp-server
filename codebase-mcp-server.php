@@ -14,7 +14,6 @@ if (PHP_SAPI !== 'cli') {
 $requiredEnvVars = [
   'CODEBASE_USERNAME',
   'CODEBASE_API_KEY',
-  'CODEBASE_PROJECT',
 ];
 
 // Make sure required environment variables are set.
@@ -29,7 +28,7 @@ foreach ($requiredEnvVars as $envVar) {
 $server = new CodebaseMCPServer(
   getenv('CODEBASE_USERNAME') ?: '',
   getenv('CODEBASE_API_KEY') ?: '',
-  getenv('CODEBASE_PROJECT') ?: '',
+  getenv('CODEBASE_PROJECT') ?: null,
   getenv('CODEBASE_API_URL') ?: null,
 );
 

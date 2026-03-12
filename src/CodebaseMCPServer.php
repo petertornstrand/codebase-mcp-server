@@ -18,20 +18,24 @@ class CodebaseMCPServer {
    *   The Codebase username (often in the format 'account/username').
    * @param string $apiKey
    *   The API key for authentication.
-   * @param string $project
+   * @param ?string $project
    *   The short name/permalink of the project.
    * @param ?string $baseUrl
-   *   The API base URL with trailing slash.
+   *   The API base URL.
    */
   public function __construct(
     private string $username,
     private string $apiKey,
-    private string $project,
+    private ?string $project = null,
     private ?string $baseUrl = null,
   ) {
     // If no environment variable for API base URL is set use a default.
-    $this->baseUrl = $baseUrl ?? "https://api3.codebasehq.com/";
-    $this->baseUrl .= $this->project;
+    if ($baseUrl) {
+      $this->baseUrl = rtrim($baseUrl, '/');
+    }
+    else {
+      $this->baseUrl = 'https://api3.codebasehq.com';
+    }
   }
 
   /**
@@ -62,13 +66,14 @@ class CodebaseMCPServer {
   private function handleRequest(array $request): array {
     $method = $request['method'] ?? '';
     $params = $request['params'] ?? [];
+    $project = $params['project'] ?? $this->project ?? '';
     $id = $request['id'] ?? null;
 
     try {
       $result = match ($method) {
         'initialize' => $this->initialize(),
         'tools/list' => $this->listTools(),
-        'tools/call' => $this->callTool($params['name'] ?? '', $params['arguments'] ?? []),
+        'tools/call' => $this->callTool($project, $params['name'] ?? '', $params['arguments'] ?? []),
         'resources/list' => $this->listResources(),
         'resources/read' => $this->readResource($params['uri'] ?? ''),
         default => throw new \Exception(sprintf('Method not found: %s', $method)),
@@ -123,11 +128,30 @@ class CodebaseMCPServer {
     return [
       'tools' => [
         [
-          'name' => 'list_tickets',
-          'description' => 'List open tickets in the project',
+          'name' => 'list_projects',
+          'description' => 'List projects',
+          'inputSchema' => [
+            'type' => 'object',
+            'properties' => (object)[],
+          ],
+        ],
+        [
+          'name' => 'get_project',
+          'description' => 'Get a specific project',
           'inputSchema' => [
             'type' => 'object',
             'properties' => [
+              'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
+            ],
+          ],
+        ],
+        [
+          'name' => 'list_tickets',
+          'description' => 'List tickets in the project',
+          'inputSchema' => [
+            'type' => 'object',
+            'properties' => [
+              'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
               'query' => ['type' => 'string', 'description' => 'Search query (e.g., status:open, assignee:username, priority:high).'],
             ],
           ],
@@ -138,6 +162,7 @@ class CodebaseMCPServer {
           'inputSchema' => [
             'type' => 'object',
             'properties' => [
+              'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
               'ticket_id' => ['type' => 'integer'],
             ],
             'required' => ['ticket_id'],
@@ -149,6 +174,7 @@ class CodebaseMCPServer {
           'inputSchema' => [
             'type' => 'object',
             'properties' => [
+              'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
               'ticket_id' => ['type' => 'integer', 'description' => 'The ID of the ticket'],
             ],
             'required' => ['ticket_id'],
@@ -159,7 +185,9 @@ class CodebaseMCPServer {
           'description' => 'Get all ticket statuses for the project',
           'inputSchema' => [
             'type' => 'object',
-            'properties' => (object)[],
+            'properties' => [
+              'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
+            ],
           ],
         ],
         [
@@ -167,7 +195,9 @@ class CodebaseMCPServer {
           'description' => 'Get all ticket priorities for the project',
           'inputSchema' => [
             'type' => 'object',
-            'properties' => (object)[],
+            'properties' => [
+              'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
+            ],
           ],
         ],
         [
@@ -175,7 +205,9 @@ class CodebaseMCPServer {
           'description' => 'Get all ticket categories for the project',
           'inputSchema' => [
             'type' => 'object',
-            'properties' => (object)[],
+            'properties' => [
+              'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
+            ],
           ],
         ],
         [
@@ -183,7 +215,9 @@ class CodebaseMCPServer {
           'description' => 'Get all ticket types for the project',
           'inputSchema' => [
             'type' => 'object',
-            'properties' => (object)[],
+            'properties' => [
+              'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
+            ],
           ],
         ],
         [
@@ -192,6 +226,7 @@ class CodebaseMCPServer {
           'inputSchema' => [
             'type' => 'object',
             'properties' => [
+              'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
               'summary' => ['type' => 'string', 'description' => 'The title of the ticket'],
               'description' => ['type' => 'string', 'description' => 'The detailed description of the ticket'],
               'status' => ['type' => 'string', 'description' => 'Status name (e.g., New, Open)'],
@@ -208,6 +243,7 @@ class CodebaseMCPServer {
           'inputSchema' => [
             'type' => 'object',
             'properties' => [
+              'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
               'ticket_id' => ['type' => 'integer', 'description' => 'The ID of the ticket to update'],
               'content' => ['type' => 'string', 'description' => 'The comment or note text'],
               'status' => ['type' => 'string', 'description' => 'New status name'],
@@ -224,7 +260,9 @@ class CodebaseMCPServer {
           'description' => 'Get all milestones for the project',
           'inputSchema' => [
             'type' => 'object',
-            'properties' => (object)[],
+            'properties' => [
+              'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
+            ],
           ],
         ],
         [
@@ -232,7 +270,9 @@ class CodebaseMCPServer {
           'description' => 'Get the recent activity for the project',
           'inputSchema' => [
             'type' => 'object',
-            'properties' => (object)[],
+            'properties' => [
+              'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
+            ],
           ],
         ],
         [
@@ -240,7 +280,9 @@ class CodebaseMCPServer {
           'description' => 'Get all users assigned to the project',
           'inputSchema' => [
             'type' => 'object',
-            'properties' => (object)[],
+            'properties' => [
+              'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
+            ],
           ],
         ],
       ]
@@ -260,20 +302,21 @@ class CodebaseMCPServer {
    *
    * @throws \Exception If the tool name is unknown.
    */
-  private function callTool(string $name, array $args): array {
+  private function callTool(string $project, string $name, array $args): array {
     $content = match ($name) {
-      'list_tickets' => $this->apiGet("/tickets", ['query' => $args['query'] ?? 'status:open']),
-      'get_ticket' => $this->apiGet("/tickets/{$args['ticket_id']}"),
-      'get_ticket_notes' => $this->apiGet("/tickets/{$args['ticket_id']}/notes"),
-      'get_ticket_statuses' => $this->apiGet("/tickets/statuses"),
-      'get_ticket_priorities' => $this->apiGet("/tickets/priorities"),
-      'get_ticket_categories' => $this->apiGet("/tickets/categories"),
-      'get_ticket_types' => $this->apiGet("/tickets/types"),
-      'create_ticket' => $this->apiPost("/tickets", ['ticket' => $args]),
-      'update_ticket' => $this->apiPost("/tickets/{$args['ticket_id']}/notes", $this->buildTicketNotePayload($args)),
-      'get_milestones' => $this->apiGet("/milestones"),
-      'get_project_activity' => $this->apiGet("/activity"),
-      'get_project_users' => $this->apiGet("/assignments"),
+      'list_projects' => $this->apiGet("/projects"),
+      'get_project' => $this->apiGet("/{$project}/{$args['ticket_id']}"),
+      'list_tickets' => $this->apiGet("/{$project}/tickets", ['query' => $args['query'] ?? 'status:open']),
+      'get_ticket' => $this->apiGet("/{$project}/tickets/{$args['ticket_id']}/notes"),
+      'get_ticket_statuses' => $this->apiGet("/{$project}/tickets/statuses"),
+      'get_ticket_priorities' => $this->apiGet("/{$project}/tickets/priorities"),
+      'get_ticket_categories' => $this->apiGet("/{$project}/tickets/categories"),
+      'get_ticket_types' => $this->apiGet("/{$project}/tickets/types"),
+      'create_ticket' => $this->apiPost("/{$project}/tickets", ['ticket' => $args]),
+      'update_ticket' => $this->apiPost("/{$project}/tickets/{$args['ticket_id']}/notes", $this->buildTicketNotePayload($args)),
+      'get_milestones' => $this->apiGet("/{$project}/milestones"),
+      'get_project_activity' => $this->apiGet("/{$project}/activity"),
+      'get_project_users' => $this->apiGet("/{$project}/assignments"),
       default => throw new \Exception(sprintf('Unknown tool: %s', $name)),
     };
 
@@ -302,6 +345,11 @@ class CodebaseMCPServer {
    * @throws \Exception
    */
   private function buildTicketNotePayload(array $args): array {
+    $project = $this->project ?? $args['project'] ?? null;
+    if (is_null($project)) {
+      throw new \Exception('Missing required argument: project. Either set environment variable CODEBASE_PROJECT or pass argument to tool.');
+    }
+
     $ticketNote = [
       'content' => (string) ($args['content'] ?? ''),
     ];
@@ -309,19 +357,19 @@ class CodebaseMCPServer {
     $changes = [];
 
     if (!empty($args['status'])) {
-      $changes['status_id'] = $this->findPropertyIdByName('/tickets/statuses', $args['status']);
+      $changes['status_id'] = $this->findPropertyIdByName("/{$project}/tickets/statuses", $args['status']);
     }
 
     if (!empty($args['priority'])) {
-      $changes['priority_id'] = $this->findPropertyIdByName('/tickets/priorities', $args['priority']);
+      $changes['priority_id'] = $this->findPropertyIdByName("/{$project}/tickets/priorities", $args['priority']);
     }
 
     if (!empty($args['category'])) {
-      $changes['category_id'] = $this->findPropertyIdByName('/tickets/categories', $args['category']);
+      $changes['category_id'] = $this->findPropertyIdByName("/{$project}/tickets/categories", $args['category']);
     }
 
     if (!empty($args['assignee'])) {
-      $changes['assignee_id'] = $this->findProjectUserId($args['assignee']);
+      $changes['assignee_id'] = $this->findProjectUserId($project, $args['assignee']);
     }
 
     if (!empty($args['summary'])) {
@@ -369,6 +417,8 @@ class CodebaseMCPServer {
   /**
    * Helper to find a project user's ID by searching their name or username.
    *
+   * @param string $project
+   *   The project permalink.
    * @param string $search
    *   The name or username to search for.
    *
@@ -377,8 +427,8 @@ class CodebaseMCPServer {
    *
    * @throws \Exception If no user or multiple users are found.
    */
-  private function findProjectUserId(string $search): int {
-    $items = $this->apiGet('/assignments');
+  private function findProjectUserId(string $project, string $search): int {
+    $items = $this->apiGet("/{$project}/assignments");
     $searchNormalized = $this->normalizeLookupValue($search);
 
     $matches = [];
