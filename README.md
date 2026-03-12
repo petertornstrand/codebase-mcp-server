@@ -24,6 +24,7 @@ The MCP server provides the following tools:
 To build the server, execute the following command from the project root:
 
 ```bash
+BUILD_DIR='./build' \
 php -d phar.readonly=0 build-phar.php
 ```
 
