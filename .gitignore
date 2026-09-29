@@ -1,2 +1,5 @@
 /build/
 /vendor/
+/.claude-mpm/
+/.idea/
+.env

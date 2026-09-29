@@ -36,6 +36,18 @@ foreach ($files as $file) {
   $phar->addFile($fullPath, $file);
 }
 
+$vendorDir = __DIR__ . '/vendor';
+if (!is_dir($vendorDir)) {
+  fwrite(STDERR, "Missing vendor directory. Run: composer install --no-dev\n");
+  exit(1);
+}
+$iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($vendorDir, FilesystemIterator::SKIP_DOTS));
+foreach ($iterator as $file) {
+  if ($file->isFile()) {
+    $phar->addFile($file->getPathname(), 'vendor/' . substr($file->getPathname(), strlen($vendorDir) + 1));
+  }
+}
+
 $stub = <<<'PHP'
 #!/usr/bin/env php
 <?php
