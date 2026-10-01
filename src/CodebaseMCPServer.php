@@ -309,9 +309,10 @@ class CodebaseMCPServer {
   private function callTool(string $project, string $name, array $args): array {
     $content = match ($name) {
       'list_projects' => $this->apiGet("/projects"),
-      'get_project' => $this->apiGet("/{$project}/{$args['ticket_id']}"),
+      'get_project' => $this->apiGet("/{$project}"),
       'list_tickets' => $this->apiGet("/{$project}/tickets", ['query' => $args['query'] ?? 'status:open']),
-      'get_ticket' => $this->apiGet("/{$project}/tickets/{$args['ticket_id']}/notes"),
+      'get_ticket' => $this->apiGet("/{$project}/tickets/{$args['ticket_id']}"),
+      'get_ticket_notes' => $this->apiGet("/{$project}/tickets/{$args['ticket_id']}/notes"),
       'get_ticket_statuses' => $this->apiGet("/{$project}/tickets/statuses"),
       'get_ticket_priorities' => $this->apiGet("/{$project}/tickets/priorities"),
       'get_ticket_categories' => $this->apiGet("/{$project}/tickets/categories"),
