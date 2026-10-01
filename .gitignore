@@ -3,3 +3,4 @@
 /.claude-mpm/
 /.idea/
 .env
+/**/.kuzu-memory/
