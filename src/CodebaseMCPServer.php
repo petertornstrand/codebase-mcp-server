@@ -346,7 +346,7 @@ class CodebaseMCPServer {
     $content = match ($name) {
       'list_projects' => $this->apiGet("/projects"),
       'get_project' => $this->apiGet("/{$project}"),
-      'list_tickets' => $this->apiGet("/{$project}/tickets", ['query' => $args['query'] ?? 'status:open']),
+      'list_tickets' => $this->listTickets($project, $args['query'] ?? 'status:open'),
       'get_ticket' => $this->apiGet("/{$project}/tickets/{$args['ticket_id']}"),
       'get_ticket_notes' => $this->apiGet("/{$project}/tickets/{$args['ticket_id']}/notes"),
       'get_ticket_statuses' => $this->apiGet("/{$project}/tickets/statuses"),
@@ -369,6 +369,33 @@ class CodebaseMCPServer {
         ],
       ],
     ];
+  }
+
+  /**
+   * Searches tickets, treating "no matches" as an empty list.
+   *
+   * Codebase answers a search without results with 404 and an empty list.
+   * That is only an empty result if the project itself exists, so check it
+   * before swallowing the error.
+   *
+   * @return array
+   *   The matching tickets.
+   *
+   * @throws \Exception If the search or the project lookup fails.
+   */
+  private function listTickets(string $project, string $query): array {
+    try {
+      return $this->apiGet("/{$project}/tickets", ['query' => $query]);
+    }
+    catch (CodebaseApiException $e) {
+      if ($e->status !== 404) {
+        throw $e;
+      }
+    }
+
+    // Throws the explicit "not found" error if the project does not exist.
+    $this->apiGet("/{$project}");
+    return [];
   }
 
   /**
