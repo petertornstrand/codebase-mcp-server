@@ -280,6 +280,56 @@ class CodebaseMCPServerTest extends TestCase {
     $this->assertStringContainsString('Codebase API error (500)', $message);
   }
 
+  public function testSearchWithoutMatchesIsAnEmptyListNotAnError(): void {
+    $result = $this->payload($this->call($this->server(), 'list_tickets', ['project' => 'quiet', 'query' => 'assignee:me status:open']));
+    $this->assertSame([], $result);
+    // It confirmed the project exists before treating the 404 as empty.
+    $this->assertSame(['/quiet/tickets.json', '/quiet.json'], array_column(self::$api->requests(), 'path'));
+  }
+
+  public function testSearchInAMissingProjectIsAnExplicitError(): void {
+    $message = $this->error($this->call($this->server(), 'list_tickets', ['project' => 'missing']));
+    $this->assertStringContainsString('Codebase API error (404)', $message);
+    $this->assertStringContainsString('/missing was not found', $message);
+    $this->assertStringNotContainsString('[]', $message);
+  }
+
+  public function testOtherSearchFailuresAreNotTreatedAsEmpty(): void {
+    $this->assertStringContainsString('(500)', $this->error($this->call($this->server(), 'list_tickets', ['project' => 'broken'])));
+    $this->assertStringContainsString('(401)', $this->error($this->call($this->server(key: 'wrong'), 'list_tickets', ['project' => 'quiet'])));
+  }
+
+  public function testNotFoundOnOtherToolsStaysExplicit(): void {
+    $message = $this->error($this->call($this->server(), 'get_ticket', ['project' => 'missing', 'ticket_id' => 1]));
+    $this->assertStringContainsString('/missing/tickets/1 was not found', $message);
+  }
+
+  public function testNotFoundIsExplainedForPostsToo(): void {
+    $message = $this->error($this->call($this->server(), 'create_ticket', ['project' => 'missing', 'summary' => 'x']));
+    $this->assertStringContainsString('was not found', $message);
+  }
+
+  public function testFailedToolCallsAreLoggedWithoutCredentials(): void {
+    $log = tempnam(sys_get_temp_dir(), 'mcp-log');
+    $previous = ini_set('error_log', $log);
+    try {
+      $this->call($this->server(), 'list_tickets', ['project' => 'missing']);
+      $this->call($this->server(), 'get_milestones', ['project' => 'acme']);
+      $this->rpc($this->server(), 'nope');
+    }
+    finally {
+      ini_set('error_log', $previous === FALSE ? '' : $previous);
+    }
+    $logged = (string) file_get_contents($log);
+    unlink($log);
+
+    $this->assertStringContainsString('Tool call failed: tool=list_tickets project=missing', $logged);
+    $this->assertStringContainsString('(404)', $logged);
+    $this->assertSame(1, substr_count($logged, 'Tool call failed'), 'only failed tool calls are logged');
+    $this->assertStringNotContainsString('good-key', $logged);
+    $this->assertStringNotContainsString('acme/peter', $logged);
+  }
+
   public function testUnreachableApiIsAnError(): void {
     $server = new CodebaseMCPServer('acme/peter', 'good-key', NULL, 'http://127.0.0.1:1');
     $this->assertStringContainsString('cURL error', $this->error($this->call($server, 'list_projects')));

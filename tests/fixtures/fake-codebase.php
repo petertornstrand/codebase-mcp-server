@@ -2,7 +2,7 @@
 
 // Router for a fake Codebase API, run with: php -S 127.0.0.1:<port> <this file>
 // Logs every request as a JSON line to the file named by FAKE_LOG.
-// Credentials accepted: acme/peter : good-key. Project "broken" always fails.
+// Credentials accepted: acme/peter : good-key. Project "broken" always fails; "missing" does not exist (404 [] everywhere); searches in "quiet" have no matches (404 []).
 
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $method = $_SERVER['REQUEST_METHOD'];
@@ -31,6 +31,19 @@ if ($user !== 'acme/peter' || $pass !== 'good-key') {
 if (str_starts_with($path, '/broken/')) {
   http_response_code(500);
   echo 'kaboom';
+  return;
+}
+
+if ($path === '/missing.json' || str_starts_with($path, '/missing/')) {
+  http_response_code(404);
+  echo '[]';
+  return;
+}
+
+// Codebase answers a ticket search without matches with 404 and [].
+if ($path === '/quiet/tickets.json') {
+  http_response_code(404);
+  echo '[]';
   return;
 }
 
