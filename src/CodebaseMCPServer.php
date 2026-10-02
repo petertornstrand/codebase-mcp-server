@@ -337,7 +337,7 @@ class CodebaseMCPServer {
    */
   private function callTool(string $project, string $name, array $args): array {
     if (str_contains($name, 'ticket') && isset($args['ticket_id'])) {
-      if (!preg_match('/^\d+$/', (string) $args['ticket_id'])) {
+      if (!is_scalar($args['ticket_id']) || !preg_match('/^\d+$/', (string) $args['ticket_id'])) {
         throw new \Exception('Invalid ticket_id.');
       }
       $args['ticket_id'] = (int) $args['ticket_id'];
@@ -353,7 +353,7 @@ class CodebaseMCPServer {
       'get_ticket_priorities' => $this->apiGet("/{$project}/tickets/priorities"),
       'get_ticket_categories' => $this->apiGet("/{$project}/tickets/categories"),
       'get_ticket_types' => $this->apiGet("/{$project}/tickets/types"),
-      'create_ticket' => $this->apiPost("/{$project}/tickets", ['ticket' => $args]),
+      'create_ticket' => $this->apiPost("/{$project}/tickets", ['ticket' => array_diff_key($args, ['project' => TRUE])]),
       'update_ticket' => $this->apiPost("/{$project}/tickets/{$args['ticket_id']}/notes", $this->buildTicketNotePayload($project, $args)),
       'get_milestones' => $this->apiGet("/{$project}/milestones"),
       'get_project_activity' => $this->apiGet("/{$project}/activity"),
