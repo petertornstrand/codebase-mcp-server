@@ -8,6 +8,8 @@ The MCP server provides the following tools:
 * Get project
 * List tickets (one project, 20 per page)
 * List my tickets (across all active projects in one call)
+* Find inactive projects (projects you are assigned to without activity for 12+ months)
+* Unassign from projects (remove yourself from inactive projects; dry run unless confirmed)
 * Get ticket
 * Get ticket notes
 * Get ticket statuses
@@ -160,3 +162,29 @@ ddev exec vendor/bin/phpunit
 
 The tests run the full OAuth and SAML flow against a fake identity provider
 that signs responses with a throwaway key.
+
+### Finding and leaving inactive projects
+
+`find_inactive_projects` (read-only) lists the active projects you are assigned
+to where you have had no activity for at least the given number of months
+(minimum 12). You count as active if you have an open ticket assigned, a ticket
+assigned to you updated within the period, or an event by you in the project's
+activity feed. A project is only reported as inactive when all of that was
+checked completely; anything uncertain (an error, a very busy feed, running out
+of time) is listed as `undetermined`.
+
+`unassign_from_projects` removes **only you** from the projects you name:
+
+* Without `confirm: true` it is a dry run and changes nothing.
+* Each project is checked again and is only changed if it is still inactive.
+* Codebase has no "remove user" call. The only way is to replace the project's
+  whole list of users, so the server posts everyone else back unchanged, reads
+  the list again to verify, and restores the original list if anything differs.
+  If even the restore fails, the result says `RESTORE FAILED` and includes the
+  original user ids so an administrator can fix it.
+* You must be allowed to change project users (an account administrator). It
+  never removes the only remaining user of a project.
+
+Try it on one low-stakes project first. Undoing a removal needs an account
+administrator.
+
