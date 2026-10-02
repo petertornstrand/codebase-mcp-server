@@ -1,0 +1,13 @@
+# Route /mcp (and everything else) to index.php.
+RewriteEngine On
+
+# LiteSpeed/CGI strips the Authorization header unless it is passed on.
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^ index.php [L]
+
+# Never serve dotfiles or config.
+<FilesMatch "^(\.|config\.php)">
+  Require all denied
+</FilesMatch>
