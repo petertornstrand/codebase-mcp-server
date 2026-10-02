@@ -19,6 +19,8 @@ if (preg_match('/^Basic\s+(.+)$/i', $_SERVER['HTTP_AUTHORIZATION'] ?? '', $m)) {
   [$user, $pass] = array_pad(explode(':', base64_decode($m[1]), 2), 2, NULL);
 }
 
+$rawBody = file_get_contents('php://input');
+
 file_put_contents(getenv('FAKE_LOG'), json_encode([
   'method' => $method,
   'path' => $path,
@@ -26,9 +28,11 @@ file_put_contents(getenv('FAKE_LOG'), json_encode([
   'user' => $user,
   'pass' => $pass,
   'accept' => $_SERVER['HTTP_ACCEPT'] ?? NULL,
+  'content_type' => $_SERVER['CONTENT_TYPE'] ?? NULL,
   'started' => $startedAt,
   'finished' => microtime(TRUE),
-  'body' => json_decode(file_get_contents('php://input'), TRUE),
+  'body' => json_decode($rawBody, TRUE),
+  'raw' => $rawBody,
 ]) . "\n", FILE_APPEND | LOCK_EX);
 
 if ($user !== 'acme/peter' || $pass !== 'good-key') {
@@ -96,7 +100,23 @@ $project = fn(string $name, string $permalink, int $open, string $status = 'acti
 
 $milestone = ['id' => 5, 'identifier' => 'rel-1', 'name' => 'Rel 1', 'start_at' => '2026-10-01', 'deadline' => '2026-11-01', 'parent_id' => NULL, 'description' => '', 'responsible_user_id' => 2, 'estimated_time' => 0, 'status' => 'active'];
 
+$iaProjects = ['ia-ticket-open', 'ia-ticket-recent', 'ia-ticket-old', 'ia-ticket-error', 'ia-event', 'ia-late', 'ia-inactive',
+  'ia-oldevent', 'ia-busy', 'ia-denied', 'ia-solo', 'ia-flaky', 'ia-stubborn', 'ia-ignored', 'ia-rejects'];
+$assignedProject = fn(string $permalink, string $status = 'active') => [
+  'project-id' => 1, 'account-name' => 'acme', 'group-id' => '', 'icon' => 0, 'name' => ucfirst($permalink),
+  'overview' => '', 'start-page' => 'overview', 'status' => $status, 'permalink' => $permalink, 'disk-usage' => 0,
+];
+
 $lists = [
+  '/profile.json' => ['user' => [
+    'company' => '', 'access_level' => NULL, 'last_activity_at' => '2026-10-01T10:00:00Z', 'email_address' => 'peter@acme.test',
+    'id' => 5, 'last_name' => 'Tornstrand', 'first_name' => 'Peter', 'username' => 'peter', 'enabled' => TRUE,
+    'role' => ['name' => 'Account Administrators', 'id' => 1, 'default' => FALSE, 'permissions' => ['account.users']],
+    'assignments' => array_merge(
+      [$assignedProject('acme'), $assignedProject('beta'), $assignedProject('old', 'archived')],
+      array_map($assignedProject, $iaProjects)
+    ),
+  ]],
   '/acme/tickets/statuses.json' => [
     ['ticketing_status' => ['id' => 11, 'name' => 'Closed', 'colour' => '#000', 'order' => 5, 'treat_as_closed' => TRUE]],
     ['ticketing_status' => ['id' => 12, 'name' => 'In Progress', 'colour' => '#00f', 'order' => 2, 'treat_as_closed' => FALSE]],
@@ -135,6 +155,108 @@ $lists = [
   '/many/tickets.json' => pagedTickets(45, 1000),
   '/endless/tickets.json' => pagedTickets(10000, 5000),
 ];
+
+// ---- Scenarios for finding and leaving inactive projects ("ia-" projects).
+
+$days = fn(int $n) => gmdate('Y-m-d\TH:i:s\Z', time() - $n * 86400);
+$event = fn(int $id, int $user, int $daysAgo) => ['event' => [
+  'title' => "Event $id", 'id' => $id, 'timestamp' => $days($daysAgo), 'type' => 'ticketing_note', 'html_title' => '', 'html_text' => '',
+  'user_id' => $user, 'actor_email' => "user$user@acme.test", 'actor_name' => "User $user", 'project_id' => 1, 'deleted' => FALSE, 'avatar_url' => '',
+]];
+$ticketUpdated = function (array $t, int $daysAgo) use ($days) { $t['ticket']['updated_at'] = $days($daysAgo); return $t; };
+
+$stateFile = getenv('FAKE_LOG') . '.assignments';
+$readState = function () use ($stateFile) { return is_file($stateFile) ? json_decode(file_get_contents($stateFile), TRUE) : []; };
+$writeState = function (array $state) use ($stateFile) { file_put_contents($stateFile, json_encode($state), LOCK_EX); };
+$userObject = fn(int $id) => ['user' => ['company' => '', 'first_name' => "User", 'last_name' => (string) $id, 'id' => $id, 'username' => "user$id", 'email_address' => "user$id@acme.test"]];
+
+if (preg_match('#^/(ia-[a-z-]+)/(tickets|activity|assignments)(\.json)?$#', $path, $m)) {
+  [, $iaProject, $resource, $jsonSuffix] = $m + [3 => ''];
+
+  if ($resource === 'tickets' && $method === 'GET') {
+    $query = $_GET['query'] ?? '';
+    $open = str_contains($query, 'status:open');
+    $result = match ($iaProject) {
+      'ia-ticket-open' => [$ticketUpdated(ticket(900, 'Mine'), 2)],
+      'ia-ticket-recent' => $open ? [] : [$ticketUpdated(ticket(901, 'Mine', 'Closed'), 30)],
+      'ia-ticket-old' => $open ? [] : [$ticketUpdated(ticket(902, 'Mine', 'Closed'), 500)],
+      'ia-ticket-error' => NULL,
+      default => [],
+    };
+    if ($result === NULL) {
+      http_response_code(500);
+      echo 'kaboom';
+      return;
+    }
+    if ($result === []) {
+      http_response_code(404);
+    }
+    echo json_encode($result);
+    return;
+  }
+
+  if ($resource === 'activity' && $method === 'GET') {
+    if ($iaProject === 'ia-denied') {
+      http_response_code(403);
+      echo 'forbidden';
+      return;
+    }
+    $page = max(1, (int) ($_GET['page'] ?? 1));
+    $since = isset($_GET['since']) ? strtotime($_GET['since']) : 0;
+    $others = fn(int $from, int $count) => array_map(fn($i) => $event($from + $i, 9, 5 + $i), range(0, $count - 1));
+    $events = match ($iaProject) {
+      'ia-event' => array_merge($others(1, 3), [$event(10, 5, 100)]),
+      'ia-late' => array_merge($others(100, 40), [$event(20, 5, 200)], $others(200, 3)),
+      'ia-inactive' => $others(1, 5),
+      'ia-oldevent' => [$event(30, 5, 500)],
+      default => [],
+    };
+    if ($iaProject === 'ia-busy') {
+      $slice = $others(1000 + ($page - 1) * 20, 20);
+    }
+    else {
+      // Like Codebase: only events since the given time, 20 to a page.
+      $events = array_values(array_filter($events, fn($e) => strtotime($e['event']['timestamp']) >= $since));
+      $slice = array_slice($events, ($page - 1) * 20, 20);
+    }
+    echo json_encode($slice);
+    return;
+  }
+
+  if ($resource === 'assignments' && $method === 'GET') {
+    $state = $readState();
+    $ids = $state[$iaProject] ?? ($iaProject === 'ia-solo' ? [5] : [5, 6, 7]);
+    echo json_encode(array_map($userObject, $ids));
+    return;
+  }
+
+  if ($resource === 'assignments' && $method === 'POST' && $jsonSuffix === '') {
+    if ($iaProject === 'ia-rejects') {
+      http_response_code(403);
+      echo 'Forbidden';
+      return;
+    }
+    preg_match_all('#<id>(\d+)</id>#', $rawBody, $ids);
+    $posted = array_map('intval', $ids[1]);
+    $state = $readState();
+    $posts = $state['_posts'][$iaProject] = ($state['_posts'][$iaProject] ?? 0) + 1;
+
+    $stored = match (TRUE) {
+      // Silently loses the first user it is given (the first time only).
+      $iaProject === 'ia-flaky' && $posts === 1 => array_slice($posted, 1),
+      // Always loses a user, so a restore cannot succeed either.
+      $iaProject === 'ia-stubborn' => array_slice($posted, 1),
+      // Says OK but changes nothing.
+      $iaProject === 'ia-ignored' => $state[$iaProject] ?? [5, 6, 7],
+      default => $posted,
+    };
+    $state[$iaProject] = array_values($stored);
+    $writeState($state);
+    http_response_code(200);
+    echo '<users/>';
+    return;
+  }
+}
 
 if ($method === 'POST') {
   http_response_code(201);
