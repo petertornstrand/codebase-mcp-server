@@ -90,7 +90,7 @@ class CodebaseMCPServerTest extends TestCase {
   public function testToolsListDescribesEveryTool(): void {
     $tools = $this->rpc($this->server(), 'tools/list')['result']['tools'];
     $names = array_column($tools, 'name');
-    $this->assertCount(17, $names);
+    $this->assertCount(16, $names, 'the destructive tool is hidden by default');
     $this->assertSame($names, array_values(array_unique($names)));
     foreach ($tools as $tool) {
       $this->assertNotSame('', $tool['description'], $tool['name']);

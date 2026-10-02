@@ -11,6 +11,9 @@ namespace petertornstrand;
  */
 class CodebaseMCPServer {
 
+  /** Tools that remove access or data. Only available if the server allows it. */
+  private const DESTRUCTIVE_TOOLS = ['unassign_from_projects'];
+
   /** Tools that work across projects and need no project argument. */
   private const PROJECTLESS_TOOLS = ['list_projects', 'list_my_tickets', 'find_inactive_projects', 'unassign_from_projects'];
 
@@ -25,7 +28,9 @@ class CodebaseMCPServer {
 
   private const QUERY_HELP = 'Codebase search syntax: status:open, assignee:me, priority:high, type:bug, category:name, milestone:"Release 1". Comma separate values (status:new,accepted), prefix not- to negate (not-status:completed), quote values with spaces. Terms are ANDed. sort:updated_at order:desc sorts.';
 
-  private const INSTRUCTIONS = 'Tools for Codebase HQ. Most tools work on ONE project: pass its permalink as the project argument (list_projects shows the permalinks). To find tickets across ALL of the user\'s projects, for example "what tickets do I have?" or "what is assigned to me?", call list_my_tickets once. Do not call list_tickets for each project. Ticket lists are compact summaries, 20 per page in list_tickets (may_have_more says whether to fetch the next page); use get_ticket for full detail. An empty list means the search matched nothing; projects_skipped and projects_incomplete in list_my_tickets name projects that could not be fully checked. To find projects the user is assigned to but has been inactive in, use find_inactive_projects. Removing the user from projects is a separate, destructive step, unassign_from_projects: only call it with confirm true after the user has explicitly agreed to the exact list of projects.';
+  private const INSTRUCTIONS = 'Tools for Codebase HQ. Most tools work on ONE project: pass its permalink as the project argument (list_projects shows the permalinks). To find tickets across ALL of the user\'s projects, for example "what tickets do I have?" or "what is assigned to me?", call list_my_tickets once. Do not call list_tickets for each project. Ticket lists are compact summaries, 20 per page in list_tickets (may_have_more says whether to fetch the next page); use get_ticket for full detail. An empty list means the search matched nothing; projects_skipped and projects_incomplete in list_my_tickets name projects that could not be fully checked. To find projects the user is assigned to but has been inactive in, use find_inactive_projects.';
+
+  private const INSTRUCTIONS_DESTRUCTIVE = " Removing the user from projects is a separate, destructive step, unassign_from_projects: only call it with confirm true after the user has explicitly agreed to the exact list of projects.";
 
   /**
    * Initializes the Codebase MCP Server.
@@ -42,6 +47,8 @@ class CodebaseMCPServer {
    *   Seconds allowed for searches that span all projects.
    * @param int $concurrency
    *   Requests in flight at once for searches that span all projects.
+   * @param bool $allowDestructive
+   *   Whether tools that remove access or data are available. Off by default.
    */
   public function __construct(
     private string $username,
@@ -50,6 +57,7 @@ class CodebaseMCPServer {
     private ?string $baseUrl = null,
     private float $timeLimit = 20.0,
     private int $concurrency = 8,
+    private bool $allowDestructive = FALSE,
   ) {
     // If no environment variable for API base URL is set use a default.
     if (!is_null($baseUrl)) {
@@ -123,7 +131,7 @@ class CodebaseMCPServer {
       $result = match ($method) {
         'initialize' => $this->initialize((string) ($params['protocolVersion'] ?? '')),
         'ping' => (object) [],
-        'tools/list' => $this->listTools(),
+        'tools/list' => $this->availableTools($this->listTools()),
         'tools/call' => $this->callTool((string) ($project ?? ''), $params['name'] ?? '', $arguments),
         'resources/list' => $this->listResources(),
         'resources/read' => $this->readResource($params['uri'] ?? ''),
@@ -179,8 +187,24 @@ class CodebaseMCPServer {
         'name' => 'codebase-hq-mcp-server',
         'version' => '1.0.1',
       ],
-      'instructions' => self::INSTRUCTIONS,
+      'instructions' => self::INSTRUCTIONS . ($this->allowDestructive ? self::INSTRUCTIONS_DESTRUCTIVE : ''),
     ];
+  }
+
+  /**
+   * Leaves out the tools this server is not allowed to offer.
+   *
+   * @param array $list
+   *   The result of listTools().
+   *
+   * @return array
+   *   The same list without the destructive tools unless they are allowed.
+   */
+  private function availableTools(array $list): array {
+    if (!$this->allowDestructive) {
+      $list['tools'] = array_values(array_filter($list['tools'], fn($tool) => !in_array($tool['name'], self::DESTRUCTIVE_TOOLS, TRUE)));
+    }
+    return $list;
   }
 
   /**
@@ -406,6 +430,10 @@ class CodebaseMCPServer {
    * @throws \Exception If the tool name is unknown.
    */
   private function callTool(string $project, string $name, array $args): array {
+    if (!$this->allowDestructive && in_array($name, self::DESTRUCTIVE_TOOLS, TRUE)) {
+      throw new \Exception(sprintf('The tool %s is disabled: this server does not allow destructive actions (allow_destructive is false). Nothing was changed.', $name));
+    }
+
     if (str_contains($name, 'ticket') && isset($args['ticket_id'])) {
       if (!is_scalar($args['ticket_id']) || !preg_match('/^\d+$/', (string) $args['ticket_id'])) {
         throw new \Exception('Invalid ticket_id.');
@@ -515,6 +543,7 @@ class CodebaseMCPServer {
       fn(string $path, string $xml) => $this->apiPostXml($path, $xml),
       fn(float $timeLimit) => new ParallelFetcher($this->baseUrl, $this->username, $this->apiKey, $this->concurrency, $timeLimit),
       $this->timeLimit,
+      $this->allowDestructive,
     );
   }
 

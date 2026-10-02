@@ -45,6 +45,8 @@ class InactiveProjects {
    *   fn(float $timeLimit): ParallelFetcher.
    * @param float $timeLimit
    *   Seconds allowed for examining all projects.
+   * @param bool $canRemove
+   *   Whether removing the user is allowed at all. If not, unassign() refuses.
    * @param ?callable $now
    *   fn(): int. The current time (for tests).
    */
@@ -53,6 +55,7 @@ class InactiveProjects {
     private $postXml,
     private $fetcher,
     private float $timeLimit = 20.0,
+    private bool $canRemove = TRUE,
     private $now = NULL,
   ) {}
 
@@ -104,9 +107,11 @@ class InactiveProjects {
       'inactive_projects' => $inactive,
       'undetermined' => $undetermined,
       'archived_projects_ignored' => $archived,
-      'next_step' => $inactive
-        ? 'To remove the user from some of these projects, show this list and ask for explicit confirmation, then call unassign_from_projects with those projects and confirm true.'
-        : 'Nothing to remove.',
+      'next_step' => match (TRUE) {
+        !$inactive => 'Nothing to remove.',
+        !$this->canRemove => 'Removing the user from projects is disabled on this server (allow_destructive is false), so this list is for information only.',
+        default => 'To remove the user from some of these projects, show this list and ask for explicit confirmation, then call unassign_from_projects with those projects and confirm true.',
+      },
     ];
   }
 
@@ -119,6 +124,9 @@ class InactiveProjects {
    * @throws \Exception If the arguments are invalid or the profile cannot be read.
    */
   public function unassign(mixed $permalinks, mixed $months, mixed $confirm): array {
+    if (!$this->canRemove) {
+      throw new \Exception('Removing the user from projects is disabled: this server does not allow destructive actions (allow_destructive is false). Nothing was changed.');
+    }
     $months = $this->months($months);
     if (!is_array($permalinks) || !array_is_list($permalinks) || $permalinks === []) {
       throw new \Exception('projects must be a non-empty list of project permalinks.');

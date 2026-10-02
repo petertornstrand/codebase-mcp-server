@@ -30,6 +30,8 @@ $server = new CodebaseMCPServer(
   getenv('CODEBASE_API_KEY') ?: '',
   getenv('CODEBASE_PROJECT') ?: null,
   getenv('CODEBASE_API_URL') ?: null,
+  // Tools that remove access or data are off unless explicitly enabled.
+  allowDestructive: in_array(strtolower((string) getenv('CODEBASE_ALLOW_DESTRUCTIVE')), ['1', 'true'], true),
 );
 
 // Run server.

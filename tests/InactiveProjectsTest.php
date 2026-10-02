@@ -21,8 +21,8 @@ class InactiveProjectsTest extends TestCase {
     self::$api->reset();
   }
 
-  private function server(string $key = 'good-key', float $timeLimit = 20.0): CodebaseMCPServer {
-    return new CodebaseMCPServer('acme/peter', $key, NULL, self::$api->url, $timeLimit);
+  private function server(string $key = 'good-key', float $timeLimit = 20.0, bool $allowDestructive = TRUE): CodebaseMCPServer {
+    return new CodebaseMCPServer('acme/peter', $key, NULL, self::$api->url, $timeLimit, 8, $allowDestructive);
   }
 
   private function call(string $tool, array $args = [], ?CodebaseMCPServer $server = NULL): array {
@@ -379,6 +379,124 @@ class InactiveProjectsTest extends TestCase {
   public function testRejectsTooFewMonthsBeforeDoingAnything(): void {
     $this->assertSame('months must be at least 12.', $this->error($this->call('unassign_from_projects', ['projects' => ['ia-inactive'], 'months' => 6, 'confirm' => TRUE])));
     $this->assertSame([], self::$api->requests());
+  }
+
+
+  // The allow_destructive setting.
+
+  private function disabledServer(): CodebaseMCPServer {
+    return $this->server(allowDestructive: FALSE);
+  }
+
+  private function toolNames(CodebaseMCPServer $server): array {
+    return array_column($server->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list'])['result']['tools'], 'name');
+  }
+
+  public function testDestructiveToolsAreHiddenUnlessAllowed(): void {
+    $this->assertNotContains('unassign_from_projects', $this->toolNames($this->disabledServer()));
+    $this->assertContains('unassign_from_projects', $this->toolNames($this->server()));
+    // The read-only tool is always there.
+    $this->assertContains('find_inactive_projects', $this->toolNames($this->disabledServer()));
+    $this->assertCount(count($this->toolNames($this->server())) - 1, $this->toolNames($this->disabledServer()), 'only the destructive tool is hidden');
+  }
+
+  public function testTheServerDefaultsToNotAllowingDestructiveTools(): void {
+    $server = new CodebaseMCPServer('acme/peter', 'good-key', NULL, self::$api->url);
+    $this->assertNotContains('unassign_from_projects', $this->toolNames($server));
+    $this->assertStringContainsString('disabled', $this->error($this->call('unassign_from_projects', ['projects' => ['ia-inactive'], 'confirm' => TRUE], $server)));
+  }
+
+  #[DataProvider('everyKindOfCall')]
+  public function testADisabledToolRefusesToRunAndTouchesNothing(array $args): void {
+    $message = $this->error($this->call('unassign_from_projects', $args, $this->disabledServer()));
+    $this->assertStringContainsString('The tool unassign_from_projects is disabled', $message);
+    $this->assertStringContainsString('allow_destructive', $message);
+    $this->assertStringContainsString('Nothing was changed', $message);
+    $this->assertSame([], self::$api->requests(), 'not even a read');
+  }
+
+  public static function everyKindOfCall(): array {
+    return [
+      'confirmed' => [['projects' => ['ia-inactive'], 'confirm' => TRUE]],
+      'dry run' => [['projects' => ['ia-inactive']]],
+      'no arguments' => [[]],
+      'invalid arguments' => [['projects' => 'x', 'months' => 1]],
+    ];
+  }
+
+  public function testTheRefusalIsLoggedLikeAnyFailedToolCall(): void {
+    // A client that keeps calling a hidden tool shows up in the error log.
+    $log = tempnam(sys_get_temp_dir(), 'mcp-log');
+    $previous = ini_set('error_log', $log);
+    try {
+      $this->call('unassign_from_projects', ['projects' => ['ia-inactive'], 'confirm' => TRUE], $this->disabledServer());
+    }
+    finally {
+      ini_set('error_log', $previous === FALSE ? '' : $previous);
+    }
+    $logged = (string) file_get_contents($log);
+    unlink($log);
+    $this->assertStringContainsString('Tool call failed: tool=unassign_from_projects', $logged);
+  }
+
+  public function testFindingStillWorksAndSaysRemovalIsDisabled(): void {
+    $result = $this->payload($this->call('find_inactive_projects', [], $this->disabledServer()));
+    $this->assertNotEmpty($result['inactive_projects']);
+    $this->assertStringContainsString('disabled on this server', $result['next_step']);
+    $this->assertStringNotContainsString('call unassign_from_projects', $result['next_step']);
+  }
+
+  public function testInstructionsOnlyMentionRemovalWhenItIsAllowed(): void {
+    $initialize = fn(CodebaseMCPServer $s) => $s->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize'])['result']['instructions'];
+    $off = $initialize($this->disabledServer());
+    $this->assertStringContainsString('find_inactive_projects', $off);
+    $this->assertStringNotContainsString('unassign_from_projects', $off);
+    $this->assertStringNotContainsString('destructive', $off);
+    $this->assertStringContainsString('unassign_from_projects', $initialize($this->server()));
+  }
+
+  public function testTheServiceItselfRefusesToRemoveWhenNotAllowed(): void {
+    // Even if the server layer were bypassed, the class does not act.
+    $called = FALSE;
+    $touch = function () use (&$called) { $called = TRUE; return []; };
+    $service = new \petertornstrand\InactiveProjects($touch, $touch, $touch, 20.0, FALSE);
+    try {
+      $service->unassign(['ia-inactive'], 12, TRUE);
+      $this->fail('Expected an exception');
+    }
+    catch (\Exception $e) {
+      $this->assertStringContainsString('disabled', $e->getMessage());
+    }
+    $this->assertFalse($called, 'nothing was read or written');
+  }
+
+  #[DataProvider('environmentValues')]
+  public function testTheCommandLineServerReadsTheSettingFromTheEnvironment(?string $value, bool $expected): void {
+    $env = ['CODEBASE_USERNAME' => 'acme/peter', 'CODEBASE_API_KEY' => 'good-key', 'PATH' => getenv('PATH')];
+    if ($value !== NULL) {
+      $env['CODEBASE_ALLOW_DESTRUCTIVE'] = $value;
+    }
+    $process = proc_open([PHP_BINARY, __DIR__ . '/../codebase-mcp-server.php'], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, NULL, $env);
+    fwrite($pipes[0], json_encode(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list']) . "\n");
+    fclose($pipes[0]);
+    $response = json_decode(stream_get_contents($pipes[1]), TRUE);
+    proc_close($process);
+
+    $this->assertSame($expected, in_array('unassign_from_projects', array_column($response['result']['tools'], 'name'), TRUE), (string) $value);
+  }
+
+  public static function environmentValues(): array {
+    return [
+      'not set' => [NULL, FALSE],
+      'empty' => ['', FALSE],
+      'zero' => ['0', FALSE],
+      'false' => ['false', FALSE],
+      'yes' => ['yes', FALSE],
+      'on' => ['on', FALSE],
+      'one' => ['1', TRUE],
+      'true' => ['true', TRUE],
+      'TRUE' => ['TRUE', TRUE],
+    ];
   }
 
   // What the client is told.
