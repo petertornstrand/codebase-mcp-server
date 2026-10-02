@@ -47,10 +47,13 @@ class FakeCodebase {
     proc_terminate($this->process);
     proc_close($this->process);
     @unlink($this->log);
+    @unlink($this->log . '.assignments');
   }
 
   public function reset(): void {
     file_put_contents($this->log, '');
+    // Assignments are stateful in the fake API; start each test from scratch.
+    @unlink($this->log . '.assignments');
   }
 
   /**

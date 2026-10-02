@@ -23,6 +23,11 @@ return [
     'cert' => '<IdP certificate, PEM>',
   ],
 
+  // Optional: allow tools that remove access or data (currently
+  // unassign_from_projects). Must be exactly true or false; defaults to false.
+  // When false the tools are hidden from clients and refuse to run.
+  'allow_destructive' => false,
+
   // Optional: browser origins allowed to call /mcp (e.g. MCP Inspector).
   // 'allowed_origins' => [],
 

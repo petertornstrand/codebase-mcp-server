@@ -35,6 +35,13 @@ class App {
       throw new \InvalidArgumentException('base_url must be an https origin without a path.');
     }
 
+    // Destructive tools are off unless the config says true. Anything that is
+    // not a real boolean is an error: a string like 'false' is truthy in PHP.
+    $allowDestructive = $config['allow_destructive'] ?? FALSE;
+    if (!is_bool($allowDestructive)) {
+      throw new \InvalidArgumentException('allow_destructive must be true or false.');
+    }
+
     $apiUrl = $config['api_url'] ?? NULL;
     $verifyCredentials ??= function (string $username, string $apiKey) use ($apiUrl): void {
       (new CodebaseMCPServer($username, $apiKey, NULL, $apiUrl))->verifyCredentials();
@@ -57,6 +64,7 @@ class App {
       $this->oauth->resourceMetadataUrl(),
       $config['allowed_origins'] ?? [],
       $apiUrl,
+      $allowDestructive,
     );
   }
 

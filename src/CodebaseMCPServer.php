@@ -11,8 +11,11 @@ namespace petertornstrand;
  */
 class CodebaseMCPServer {
 
+  /** Tools that remove access or data. Only available if the server allows it. */
+  private const DESTRUCTIVE_TOOLS = ['unassign_from_projects'];
+
   /** Tools that work across projects and need no project argument. */
-  private const PROJECTLESS_TOOLS = ['list_projects', 'list_my_tickets'];
+  private const PROJECTLESS_TOOLS = ['list_projects', 'list_my_tickets', 'find_inactive_projects', 'unassign_from_projects'];
 
   /** Most projects searched in one list_my_tickets call. */
   private const MAX_PROJECTS = 100;
@@ -25,7 +28,9 @@ class CodebaseMCPServer {
 
   private const QUERY_HELP = 'Codebase search syntax: status:open, assignee:me, priority:high, type:bug, category:name, milestone:"Release 1". Comma separate values (status:new,accepted), prefix not- to negate (not-status:completed), quote values with spaces. Terms are ANDed. sort:updated_at order:desc sorts.';
 
-  private const INSTRUCTIONS = 'Tools for Codebase HQ. Most tools work on ONE project: pass its permalink as the project argument (list_projects shows the permalinks). To find tickets across ALL of the user\'s projects, for example "what tickets do I have?" or "what is assigned to me?", call list_my_tickets once. Do not call list_tickets for each project. Ticket lists are compact summaries, 20 per page in list_tickets (may_have_more says whether to fetch the next page); use get_ticket for full detail. An empty list means the search matched nothing; projects_skipped and projects_incomplete in list_my_tickets name projects that could not be fully checked.';
+  private const INSTRUCTIONS = 'Tools for Codebase HQ. Most tools work on ONE project: pass its permalink as the project argument (list_projects shows the permalinks). To find tickets across ALL of the user\'s projects, for example "what tickets do I have?" or "what is assigned to me?", call list_my_tickets once. Do not call list_tickets for each project. Ticket lists are compact summaries, 20 per page in list_tickets (may_have_more says whether to fetch the next page); use get_ticket for full detail. An empty list means the search matched nothing; projects_skipped and projects_incomplete in list_my_tickets name projects that could not be fully checked. To find projects the user is assigned to but has been inactive in, use find_inactive_projects.';
+
+  private const INSTRUCTIONS_DESTRUCTIVE = " Removing the user from projects is a separate, destructive step, unassign_from_projects: only call it with confirm true after the user has explicitly agreed to the exact list of projects.";
 
   /**
    * Initializes the Codebase MCP Server.
@@ -42,6 +47,8 @@ class CodebaseMCPServer {
    *   Seconds allowed for searches that span all projects.
    * @param int $concurrency
    *   Requests in flight at once for searches that span all projects.
+   * @param bool $allowDestructive
+   *   Whether tools that remove access or data are available. Off by default.
    */
   public function __construct(
     private string $username,
@@ -50,6 +57,7 @@ class CodebaseMCPServer {
     private ?string $baseUrl = null,
     private float $timeLimit = 20.0,
     private int $concurrency = 8,
+    private bool $allowDestructive = FALSE,
   ) {
     // If no environment variable for API base URL is set use a default.
     if (!is_null($baseUrl)) {
@@ -123,7 +131,7 @@ class CodebaseMCPServer {
       $result = match ($method) {
         'initialize' => $this->initialize((string) ($params['protocolVersion'] ?? '')),
         'ping' => (object) [],
-        'tools/list' => $this->listTools(),
+        'tools/list' => $this->availableTools($this->listTools()),
         'tools/call' => $this->callTool((string) ($project ?? ''), $params['name'] ?? '', $arguments),
         'resources/list' => $this->listResources(),
         'resources/read' => $this->readResource($params['uri'] ?? ''),
@@ -179,8 +187,24 @@ class CodebaseMCPServer {
         'name' => 'codebase-hq-mcp-server',
         'version' => '1.0.1',
       ],
-      'instructions' => self::INSTRUCTIONS,
+      'instructions' => self::INSTRUCTIONS . ($this->allowDestructive ? self::INSTRUCTIONS_DESTRUCTIVE : ''),
     ];
+  }
+
+  /**
+   * Leaves out the tools this server is not allowed to offer.
+   *
+   * @param array $list
+   *   The result of listTools().
+   *
+   * @return array
+   *   The same list without the destructive tools unless they are allowed.
+   */
+  private function availableTools(array $list): array {
+    if (!$this->allowDestructive) {
+      $list['tools'] = array_values(array_filter($list['tools'], fn($tool) => !in_array($tool['name'], self::DESTRUCTIVE_TOOLS, TRUE)));
+    }
+    return $list;
   }
 
   /**
@@ -232,6 +256,31 @@ class CodebaseMCPServer {
               'projects' => ['type' => 'array', 'items' => ['type' => 'string'], 'description' => 'Optional project permalinks to search instead of all active projects.'],
             ],
           ],
+        ],
+        [
+          'name' => 'find_inactive_projects',
+          'description' => 'Find the projects the user is assigned to where the user has had no activity for at least the given number of months (minimum 12). Activity means an open ticket assigned to the user, a ticket assigned to the user and updated within the period, or an event by the user in the project\'s activity feed. Read-only. A project is only listed as inactive when it was checked completely; projects that could not be fully checked are listed under undetermined. To remove the user from projects, use unassign_from_projects after the user has confirmed.',
+          'inputSchema' => [
+            'type' => 'object',
+            'properties' => [
+              'months' => ['type' => 'integer', 'minimum' => 12, 'default' => 12, 'description' => 'Months without activity (minimum 12).'],
+            ],
+          ],
+          'annotations' => ['readOnlyHint' => TRUE],
+        ],
+        [
+          'name' => 'unassign_from_projects',
+          'description' => 'DESTRUCTIVE: remove the user (only the user themselves, never anyone else) from the given projects. Each project is checked again and is only changed if it is still inactive for at least the given months. Without confirm true nothing is changed and the result lists what would happen (a dry run). Always run find_inactive_projects first, show the user the exact projects, and only call with confirm true after the user has explicitly agreed. Undoing this requires an account administrator.',
+          'inputSchema' => [
+            'type' => 'object',
+            'properties' => [
+              'projects' => ['type' => 'array', 'items' => ['type' => 'string'], 'minItems' => 1, 'maxItems' => 20, 'description' => 'Project permalinks to be removed from (at most 20).'],
+              'months' => ['type' => 'integer', 'minimum' => 12, 'default' => 12, 'description' => 'The inactivity period to re-check (minimum 12).'],
+              'confirm' => ['type' => 'boolean', 'default' => FALSE, 'description' => 'Must be true to actually remove the user. Otherwise a dry run.'],
+            ],
+            'required' => ['projects'],
+          ],
+          'annotations' => ['readOnlyHint' => FALSE, 'destructiveHint' => TRUE, 'idempotentHint' => TRUE],
         ],
         [
           'name' => 'get_ticket',
@@ -381,6 +430,10 @@ class CodebaseMCPServer {
    * @throws \Exception If the tool name is unknown.
    */
   private function callTool(string $project, string $name, array $args): array {
+    if (!$this->allowDestructive && in_array($name, self::DESTRUCTIVE_TOOLS, TRUE)) {
+      throw new \Exception(sprintf('The tool %s is disabled: this server does not allow destructive actions (allow_destructive is false). Nothing was changed.', $name));
+    }
+
     if (str_contains($name, 'ticket') && isset($args['ticket_id'])) {
       if (!is_scalar($args['ticket_id']) || !preg_match('/^\d+$/', (string) $args['ticket_id'])) {
         throw new \Exception('Invalid ticket_id.');
@@ -393,6 +446,8 @@ class CodebaseMCPServer {
       'get_project' => $this->apiGet("/{$project}"),
       'list_tickets' => $this->listTicketsPage($project, $args),
       'list_my_tickets' => $this->listMyTickets($args),
+      'find_inactive_projects' => $this->inactiveProjects()->find($args['months'] ?? NULL),
+      'unassign_from_projects' => $this->inactiveProjects()->unassign($args['projects'] ?? NULL, $args['months'] ?? NULL, $args['confirm'] ?? FALSE),
       'get_ticket' => $this->apiGet("/{$project}/tickets/{$args['ticket_id']}"),
       'get_ticket_notes' => $this->apiGet("/{$project}/tickets/{$args['ticket_id']}/notes"),
       'get_ticket_statuses' => $this->apiGet("/{$project}/tickets/statuses"),
@@ -477,6 +532,19 @@ class CodebaseMCPServer {
     // Throws the explicit "not found" error if the project does not exist.
     $this->apiGet("/{$project}");
     return [];
+  }
+
+  /**
+   * The service behind find_inactive_projects and unassign_from_projects.
+   */
+  private function inactiveProjects(): InactiveProjects {
+    return new InactiveProjects(
+      fn(string $path, array $params = []) => $this->apiGet($path, $params),
+      fn(string $path, string $xml) => $this->apiPostXml($path, $xml),
+      fn(float $timeLimit) => new ParallelFetcher($this->baseUrl, $this->username, $this->apiKey, $this->concurrency, $timeLimit),
+      $this->timeLimit,
+      $this->allowDestructive,
+    );
   }
 
   /**
@@ -1073,6 +1141,42 @@ class CodebaseMCPServer {
 
     curl_close($ch);
     return json_decode($response, true) ?? [];
+  }
+
+  /**
+   * Performs an XML POST to the Codebase API.
+   *
+   * Used where the API is only documented with XML bodies and the result is
+   * verified by reading the data back, such as replacing a project's users.
+   *
+   * @param string $path
+   *   The relative API path.
+   * @param string $xml
+   *   The request body.
+   *
+   * @throws \Exception On API, curl or network errors.
+   */
+  private function apiPostXml(string $path, string $xml): void {
+    $ch = curl_init($this->baseUrl . $path);
+    curl_setopt_array($ch, [
+      CURLOPT_RETURNTRANSFER => TRUE,
+      CURLOPT_CONNECTTIMEOUT => 10,
+      CURLOPT_TIMEOUT => 30,
+      CURLOPT_POST => TRUE,
+      CURLOPT_POSTFIELDS => $xml,
+      CURLOPT_USERPWD => "$this->username:$this->apiKey",
+      CURLOPT_HTTPHEADER => ['Accept: application/xml', 'Content-Type: application/xml'],
+    ]);
+
+    $response = curl_exec($ch);
+    if ($response === FALSE) {
+      throw new \Exception(sprintf('cURL error: %s', curl_error($ch)));
+    }
+
+    $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    if ($status >= 400) {
+      throw $this->apiError($status, $path, (string) $response);
+    }
   }
 
 }
