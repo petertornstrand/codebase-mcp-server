@@ -802,7 +802,8 @@ class CodebaseMCPServer {
     }
 
     if (!empty($args['summary'])) {
-      $changes['summary'] = $args['summary'];
+      // Codebase calls it the subject; a "summary" change is silently ignored.
+      $changes['subject'] = $args['summary'];
     }
 
     if ($changes !== []) {

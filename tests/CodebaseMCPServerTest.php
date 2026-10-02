@@ -238,6 +238,13 @@ class CodebaseMCPServerTest extends TestCase {
     ], $post['body']['ticket']);
   }
 
+  public function testUpdateTicketChangesTheSubjectNotTheSummary(): void {
+    // Codebase ignores "summary" inside a note's changes; the field is "subject".
+    $this->call($this->server(), 'update_ticket', ['project' => 'acme', 'ticket_id' => 12, 'summary' => 'Better title']);
+    $post = array_values(array_filter(self::$api->requests(), fn($r) => $r['method'] === 'POST'))[0];
+    $this->assertSame(['subject' => 'Better title'], $post['body']['ticket_note']['changes']);
+  }
+
   public function testCreateTicketValidatesBeforePosting(): void {
     $server = $this->server();
     $this->assertSame('summary is required.', $this->error($this->call($server, 'create_ticket', ['project' => 'acme', 'summary' => '   '])));
@@ -267,7 +274,7 @@ class CodebaseMCPServerTest extends TestCase {
       'priority_id' => 20,
       'category_id' => 30,
       'assignee_id' => 5,
-      'summary' => 'New title',
+      'subject' => 'New title',
     ], $body['ticket_note']['changes']);
   }
 
