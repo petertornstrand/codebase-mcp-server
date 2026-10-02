@@ -163,6 +163,28 @@ ddev exec vendor/bin/phpunit
 The tests run the full OAuth and SAML flow against a fake identity provider
 that signs responses with a throwaway key.
 
+### Allowing destructive actions
+
+Tools that remove access or data are **off by default**. Today that is
+`unassign_from_projects`. To allow them, set this in `config.php`:
+
+```php
+'allow_destructive' => true,
+```
+
+It must be exactly `true` or `false`. Anything else, including the string
+`'false'`, is a configuration error and the server refuses to start, so a typo
+can never switch the tools on. While it is off the tools are hidden from
+clients, calling one is refused without touching Codebase, and the read-only
+`find_inactive_projects` keeps working but says that removal is disabled.
+
+When running the local command line server instead, set the environment
+variable `CODEBASE_ALLOW_DESTRUCTIVE=1` (or `true`). Any other value leaves
+the tools off.
+
+Creating and updating tickets add data but remove none, so they are not
+treated as destructive.
+
 ### Finding and leaving inactive projects
 
 `find_inactive_projects` (read-only) lists the active projects you are assigned
@@ -173,7 +195,8 @@ activity feed. A project is only reported as inactive when all of that was
 checked completely; anything uncertain (an error, a very busy feed, running out
 of time) is listed as `undetermined`.
 
-`unassign_from_projects` removes **only you** from the projects you name:
+`unassign_from_projects` removes **only you** from the projects you name. It
+requires `allow_destructive` (see above):
 
 * Without `confirm: true` it is a dry run and changes nothing.
 * Each project is checked again and is only changed if it is still inactive.
