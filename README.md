@@ -67,3 +67,95 @@ Context Protocol (MCP)_ with the following config:
 
 Also set the correct working directory (location of this repository) and server
 level (project or global).
+
+
+## Remote (HTTP) server
+
+The server can run as a remote MCP server over Streamable HTTP, for use from
+Claude.ai, Claude Desktop and Claude Code.
+
+* Users sign in with **Google Workspace (SAML)**, restricted to one email
+  domain.
+* On first use they enter their **personal Codebase username and API key**.
+  The key is stored encrypted (XChaCha20-Poly1305) in a SQLite database.
+* Clients get OAuth 2.1 tokens issued by this server (dynamic client
+  registration, PKCE required, refresh token rotation). Every Codebase API call
+  is made with the signed-in user's own credentials.
+
+Endpoints: `/mcp`, `/authorize`, `/token`, `/register`, `/revoke`,
+`/saml/acs`, `/saml/metadata`, `/setup` and the `/.well-known/oauth-*`
+metadata documents.
+
+### Google Workspace setup
+
+In the Admin console, add a custom SAML app (Apps > Web and mobile apps) and
+use these service provider values (replace the host with your own):
+
+| Field | Value |
+|---|---|
+| Entity ID | `https://codebase-mcp.hpns.dev` |
+| ACS URL | `https://codebase-mcp.hpns.dev/saml/acs` |
+| Name ID format | `EMAIL` |
+| Name ID | Primary email |
+| Signed response | on |
+
+Turn the app on for the users or groups that should have access. Copy the
+IdP SSO URL, entity ID and certificate into `config.php`. The server also
+rejects any email outside `allowed_domain`.
+
+### Deploy
+
+1. Install dependencies without dev packages and upload the project,
+   including `vendor/`:
+
+   ```bash
+   composer install --no-dev --optimize-autoloader
+   ```
+
+2. Point the web root of the domain at `public/`. Requires PHP 8.3+ with the
+   `curl`, `dom`, `openssl`, `pdo_sqlite` and `sodium` extensions.
+3. Copy `config.example.php` to `config.php` and fill it in. Use a `data_dir`
+   outside the web root; the app creates it with `0700` permissions. Generate
+   the encryption key once and keep it safe; without it, stored API keys can
+   no longer be read and users must reconnect:
+
+   ```bash
+   php -r 'echo base64_encode(random_bytes(32)), "\n";'
+   ```
+
+4. Serve over HTTPS only.
+
+### Connect
+
+* **Claude.ai / Claude Desktop:** Settings > Connectors > Add custom
+  connector, URL `https://codebase-mcp.hpns.dev/mcp`.
+* **Claude Code:**
+
+  ```bash
+  claude mcp add --transport http codebase https://codebase-mcp.hpns.dev/mcp
+  ```
+
+  then run `/mcp` in Claude Code to authenticate.
+
+### Offboarding
+
+Access tokens last 1 hour and refresh tokens 30 days, and the identity
+provider is only consulted at sign-in. To cut off someone immediately, delete
+them in Google **and** run:
+
+```bash
+php bin/revoke-user.php someone@happiness.se
+```
+
+### Development
+
+The project includes a [DDEV](https://ddev.com) setup:
+
+```bash
+ddev start
+ddev composer install
+ddev exec vendor/bin/phpunit
+```
+
+The tests run the full OAuth and SAML flow against a fake identity provider
+that signs responses with a throwaway key.
