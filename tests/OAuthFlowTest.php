@@ -304,4 +304,187 @@ class OAuthFlowTest extends TestCase {
     $this->assertStringContainsString('error=invalid_target', $res['headers']['Location']);
   }
 
+  // Edge cases.
+
+  public function testClientRegistrationIsRateLimitedPerIp(): void {
+    $body = json_encode(['redirect_uris' => [self::REDIRECT]]);
+    for ($i = 0; $i < 20; $i++) {
+      $this->assertSame(201, $this->req('POST', '/register', ['body' => $body])['status'], "registration $i");
+    }
+    $this->assertSame(429, $this->req('POST', '/register', ['body' => $body])['status']);
+    // Another address is unaffected.
+    $this->assertSame(201, $this->req('POST', '/register', ['body' => $body, 'ip' => '198.51.100.9'])['status']);
+  }
+
+  public function testAuthorizeIsRateLimitedPerIp(): void {
+    $clientId = $this->register();
+    $query = ['client_id' => $clientId, 'redirect_uri' => self::REDIRECT, 'response_type' => 'code'];
+    for ($i = 0; $i < 60; $i++) {
+      $this->assertNotSame(429, $this->req('GET', '/authorize', ['query' => $query])['status']);
+    }
+    $this->assertSame(429, $this->req('GET', '/authorize', ['query' => $query])['status']);
+  }
+
+  public function testCredentialGuessingOnTheSetupFormIsLimited(): void {
+    [, $challenge] = self::pkce();
+    [$nonce, $flow] = $this->signIn($this->register(), $challenge);
+    for ($i = 0; $i < 5; $i++) {
+      $this->assertSame(422, $this->allow($flow, $nonce, ['api_key' => "guess$i"])['status'], "attempt $i");
+    }
+    // The sixth attempt is refused even with correct credentials.
+    $res = $this->allow($flow, $nonce);
+    $this->assertSame(429, $res['status']);
+    $this->assertArrayNotHasKey('Location', $res['headers']);
+  }
+
+  public function testUnknownPathsAndWrongMethods(): void {
+    $this->assertSame(404, $this->req('GET', '/nope')['status']);
+    $this->assertSame(404, $this->req('GET', '/')['status']);
+    foreach (['/register', '/token', '/revoke', '/setup', '/saml/acs'] as $path) {
+      $this->assertSame(405, $this->req('GET', $path)['status'], "GET $path");
+    }
+    foreach (['/authorize', '/saml/metadata'] as $path) {
+      $this->assertSame(405, $this->req('POST', $path)['status'], "POST $path");
+    }
+  }
+
+  public function testTokenEndpointRejectsBadRequests(): void {
+    $clientId = $this->register();
+    $this->assertSame(401, $this->req('POST', '/token', ['post' => ['grant_type' => 'authorization_code', 'client_id' => 'nope']])['status']);
+    $this->assertSame(401, $this->req('POST', '/token', ['post' => ['grant_type' => 'authorization_code']])['status']);
+
+    $res = $this->req('POST', '/token', ['post' => ['grant_type' => 'password', 'client_id' => $clientId]]);
+    $this->assertSame(400, $res['status']);
+    $this->assertSame('unsupported_grant_type', $this->body($res)['error']);
+    $this->assertSame('no-store', $res['headers']['Cache-Control']);
+
+    foreach ([['grant_type' => 'authorization_code'], ['grant_type' => 'authorization_code', 'code' => 'x'], ['grant_type' => 'refresh_token']] as $post) {
+      $res = $this->req('POST', '/token', ['post' => $post + ['client_id' => $clientId]]);
+      $this->assertSame('invalid_grant', $this->body($res)['error']);
+    }
+  }
+
+  public function testTokenTypesAreNotInterchangeable(): void {
+    $tokens = $this->fullFlow();
+    $this->assertSame(401, $this->mcp($tokens['refresh_token'])['status'], 'refresh token as access token');
+
+    $res = $this->req('POST', '/token', ['post' => [
+      'grant_type' => 'refresh_token', 'client_id' => $tokens['client_id'], 'refresh_token' => $tokens['access_token'],
+    ]]);
+    $this->assertSame('invalid_grant', $this->body($res)['error'], 'access token as refresh token');
+  }
+
+  public function testRefreshTokenIsBoundToItsClient(): void {
+    $tokens = $this->fullFlow();
+    $res = $this->req('POST', '/token', ['post' => [
+      'grant_type' => 'refresh_token', 'client_id' => $this->register(), 'refresh_token' => $tokens['refresh_token'],
+    ]]);
+    $this->assertSame('invalid_grant', $this->body($res)['error']);
+    // The legitimate client's token must survive the failed attempt.
+    $res = $this->req('POST', '/token', ['post' => [
+      'grant_type' => 'refresh_token', 'client_id' => $tokens['client_id'], 'refresh_token' => $tokens['refresh_token'],
+    ]]);
+    $this->assertSame(200, $res['status']);
+  }
+
+  public function testRevokingAnUnknownTokenStillSucceeds(): void {
+    $res = $this->req('POST', '/revoke', ['post' => ['token' => 'never-issued']]);
+    $this->assertSame(200, $res['status']);
+    $this->assertSame(200, $this->req('POST', '/revoke')['status']);
+  }
+
+  public function testRemovingAUserStopsTheirTokens(): void {
+    $tokens = $this->fullFlow();
+    $this->assertSame(200, $this->mcp($tokens['access_token'])['status']);
+
+    (new \petertornstrand\Storage($this->dir))->deleteUser('peter@happiness.se');
+
+    $this->assertSame(401, $this->mcp($tokens['access_token'])['status']);
+    $res = $this->req('POST', '/token', ['post' => [
+      'grant_type' => 'refresh_token', 'client_id' => $tokens['client_id'], 'refresh_token' => $tokens['refresh_token'],
+    ]]);
+    $this->assertSame('invalid_grant', $this->body($res)['error']);
+  }
+
+  public function testExpiredAccessTokensAreRejected(): void {
+    $tokens = $this->fullFlow();
+    $db = new \PDO('sqlite:' . $this->dir . '/codebase-mcp.sqlite');
+    $db->exec("UPDATE tokens SET expires_at = 1 WHERE type = 'access'");
+    $this->assertSame(401, $this->mcp($tokens['access_token'])['status']);
+  }
+
+  public function testCompletedFlowCannotBeSubmittedAgain(): void {
+    [, $challenge] = self::pkce();
+    [$nonce, $flow] = $this->signIn($this->register(), $challenge);
+    $this->assertSame(302, $this->allow($flow, $nonce)['status']);
+    $this->assertSame(400, $this->allow($flow, $nonce)['status']);
+  }
+
+  public function testReturningUserKeepsTheSavedKeyWhenLeftBlank(): void {
+    $this->fullFlow();
+    [, $challenge] = self::pkce();
+    [$nonce, $flow] = $this->signIn($this->register(), $challenge);
+    // Blank key: the stored one is verified and reused.
+    $this->assertSame(302, $this->allow($flow, $nonce, ['api_key' => '', 'username' => ''])['status']);
+
+    // Once Codebase rotates the key, the stale saved key is rejected.
+    $this->validCredentials = ['acme/peter' => 'rotated-key'];
+    [$nonce, $flow] = $this->signIn($this->register(), $challenge);
+    $this->assertSame(422, $this->allow($flow, $nonce, ['api_key' => ''])['status']);
+    $this->assertSame(302, $this->allow($flow, $nonce, ['api_key' => 'rotated-key'])['status']);
+  }
+
+  public function testChangingTheUsernameRequiresANewKey(): void {
+    $this->fullFlow();
+    [, $challenge] = self::pkce();
+    [$nonce, $flow] = $this->signIn($this->register(), $challenge);
+    $res = $this->allow($flow, $nonce, ['username' => 'acme/someone-else', 'api_key' => '']);
+    $this->assertSame(422, $res['status']);
+  }
+
+  public function testSetupPageEscapesClientControlledText(): void {
+    $res = $this->req('POST', '/register', ['body' => json_encode([
+      'client_name' => '<script>alert(1)</script>', 'redirect_uris' => [self::REDIRECT],
+    ])]);
+    [, $challenge] = self::pkce();
+    [$flow, $reqId] = $this->authorize($this->body($res)['client_id'], $challenge);
+    $page = $this->acs($flow, $this->idp->response('peter@happiness.se', $reqId, self::BASE))['body'];
+    $this->assertStringNotContainsString('<script>alert(1)</script>', $page);
+    $this->assertStringContainsString('&lt;script&gt;', $page);
+  }
+
+  public function testSetupPageIsNotCacheableOrFrameable(): void {
+    [, $challenge] = self::pkce();
+    [$flow, $reqId] = $this->authorize($this->register(), $challenge);
+    $res = $this->acs($flow, $this->idp->response('peter@happiness.se', $reqId, self::BASE));
+    $this->assertSame('no-store', $res['headers']['Cache-Control']);
+    $this->assertSame('DENY', $res['headers']['X-Frame-Options']);
+    $this->assertStringContainsString("frame-ancestors 'none'", $res['headers']['Content-Security-Policy']);
+    $this->assertStringContainsString('HttpOnly', $res['headers']['Set-Cookie']);
+    $this->assertStringContainsString('Secure', $res['headers']['Set-Cookie']);
+  }
+
+  public function testRedirectUriWithExistingQueryGetsParametersAppended(): void {
+    $uri = 'https://claude.ai/cb?existing=1';
+    [$verifier, $challenge] = self::pkce();
+    $clientId = $this->register([$uri]);
+    $res = $this->req('GET', '/authorize', ['query' => [
+      'response_type' => 'code', 'client_id' => $clientId, 'redirect_uri' => $uri,
+      'code_challenge' => $challenge, 'code_challenge_method' => 'S256', 'state' => 'a b&c',
+    ]]);
+    parse_str(parse_url($res['headers']['Location'], PHP_URL_QUERY), $q);
+    $flow = $q['RelayState'];
+    $xml = gzinflate(base64_decode($q['SAMLRequest']));
+    preg_match('/ID="([^"]+)"/', $xml, $m);
+    $page = $this->acs($flow, $this->idp->response('peter@happiness.se', $m[1], self::BASE));
+    preg_match('/name="nonce" value="([^"]+)"/', $page['body'], $n);
+
+    $allow = $this->allow($flow, $n[1]);
+    $location = $allow['headers']['Location'];
+    $this->assertStringStartsWith('https://claude.ai/cb?existing=1&code=', $location);
+    parse_str(parse_url($location, PHP_URL_QUERY), $result);
+    $this->assertSame('1', $result['existing']);
+    $this->assertSame('a b&c', $result['state'], 'state must survive encoding unchanged');
+  }
+
 }
