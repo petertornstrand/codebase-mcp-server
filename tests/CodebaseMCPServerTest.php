@@ -209,16 +209,43 @@ class CodebaseMCPServerTest extends TestCase {
 
   // Write tools.
 
-  public function testCreateTicketPostsArgumentsWithoutTheProject(): void {
+  public function testCreateTicketSendsIdsAndFillsInRequiredDefaults(): void {
     $payload = $this->payload($this->call($this->server(), 'create_ticket', [
-      'project' => 'acme', 'summary' => 'Broken login', 'description' => 'Details',
+      'project' => 'acme', 'summary' => '  Broken login  ', 'description' => 'Details',
     ]));
     $this->assertSame(99, $payload['ticket']['ticket_id']);
 
-    $request = self::$api->requests()[0];
-    $this->assertSame('POST', $request['method']);
-    $this->assertSame('/acme/tickets.json', $request['path']);
-    $this->assertSame(['ticket' => ['summary' => 'Broken login', 'description' => 'Details']], $request['body']);
+    $requests = self::$api->requests();
+    $post = array_values(array_filter($requests, fn($r) => $r['method'] === 'POST'))[0];
+    $this->assertSame('/acme/tickets.json', $post['path']);
+    // Codebase requires status and priority. The default status is the first
+    // one, by order, that does not close a ticket; the default priority is
+    // the one flagged as default. The project never ends up in the payload.
+    $this->assertSame(['ticket' => [
+      'summary' => 'Broken login', 'description' => 'Details', 'status_id' => 10, 'priority_id' => 21,
+    ]], $post['body']);
+  }
+
+  public function testCreateTicketResolvesNamesToIds(): void {
+    $this->call($this->server(), 'create_ticket', [
+      'project' => 'acme', 'summary' => 'x', 'type' => 'Enhancement', 'status' => 'in progress', 'priority' => 'HIGH',
+      'category' => 'bug', 'assignee' => 'Peter Tornstrand',
+    ]);
+    $post = array_values(array_filter(self::$api->requests(), fn($r) => $r['method'] === 'POST'))[0];
+    $this->assertSame([
+      'summary' => 'x', 'ticket_type' => 'enhancement', 'status_id' => 12, 'priority_id' => 20,
+      'category_id' => 30, 'assignee_id' => 5,
+    ], $post['body']['ticket']);
+  }
+
+  public function testCreateTicketValidatesBeforePosting(): void {
+    $server = $this->server();
+    $this->assertSame('summary is required.', $this->error($this->call($server, 'create_ticket', ['project' => 'acme', 'summary' => '   '])));
+    $this->assertSame('summary is required.', $this->error($this->call($server, 'create_ticket', ['project' => 'acme'])));
+    $this->assertStringContainsString('type must be one of', $this->error($this->call($server, 'create_ticket', ['project' => 'acme', 'summary' => 'x', 'type' => 'story'])));
+    $this->assertStringContainsString('Unable to find property "Nope"', $this->error($this->call($server, 'create_ticket', ['project' => 'acme', 'summary' => 'x', 'status' => 'Nope'])));
+    $this->assertStringContainsString('Multiple project users matched', $this->error($this->call($server, 'create_ticket', ['project' => 'acme', 'summary' => 'x', 'assignee' => 'Anna Andersson'])));
+    $this->assertEmpty(array_filter(self::$api->requests(), fn($r) => $r['method'] === 'POST'), 'nothing is created on a bad request');
   }
 
   public function testUpdateTicketWithOnlyANoteSendsNoChanges(): void {
@@ -472,6 +499,7 @@ class CodebaseMCPServerTest extends TestCase {
     }
     $this->assertStringContainsString('may_have_more', $tools['list_tickets']['description']);
     $this->assertSame('integer', $tools['list_tickets']['inputSchema']['properties']['page']['type']);
+    $this->assertSame(['bug', 'enhancement', 'task'], $tools['create_ticket']['inputSchema']['properties']['type']['enum']);
     $this->assertArrayNotHasKey('required', $tools['list_my_tickets']['inputSchema']);
   }
 

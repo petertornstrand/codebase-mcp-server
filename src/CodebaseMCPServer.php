@@ -306,8 +306,9 @@ class CodebaseMCPServer {
               'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
               'summary' => ['type' => 'string', 'description' => 'The title of the ticket'],
               'description' => ['type' => 'string', 'description' => 'The detailed description of the ticket'],
-              'status' => ['type' => 'string', 'description' => 'Status name (e.g., New, Open)'],
-              'priority' => ['type' => 'string', 'description' => 'Priority name (e.g., Low, Normal, High)'],
+              'type' => ['type' => 'string', 'enum' => ['bug', 'enhancement', 'task'], 'description' => 'Ticket type'],
+              'status' => ['type' => 'string', 'description' => 'Status name (e.g., New, Open). Defaults to the project\'s first open status.'],
+              'priority' => ['type' => 'string', 'description' => 'Priority name (e.g., Low, Normal, High). Defaults to the project\'s default priority.'],
               'category' => ['type' => 'string', 'description' => 'Category name'],
               'assignee' => ['type' => 'string', 'description' => 'Username of the assignee'],
             ],
@@ -398,7 +399,7 @@ class CodebaseMCPServer {
       'get_ticket_priorities' => $this->apiGet("/{$project}/tickets/priorities"),
       'get_ticket_categories' => $this->apiGet("/{$project}/tickets/categories"),
       'get_ticket_types' => $this->apiGet("/{$project}/tickets/types"),
-      'create_ticket' => $this->apiPost("/{$project}/tickets", ['ticket' => array_diff_key($args, ['project' => TRUE])]),
+      'create_ticket' => $this->apiPost("/{$project}/tickets", $this->buildTicketCreatePayload($project, $args)),
       'update_ticket' => $this->apiPost("/{$project}/tickets/{$args['ticket_id']}/notes", $this->buildTicketNotePayload($project, $args)),
       'get_milestones' => $this->apiGet("/{$project}/milestones"),
       'get_project_activity' => $this->apiGet("/{$project}/activity"),
@@ -668,6 +669,97 @@ class CodebaseMCPServer {
       ];
     }
     return $active;
+  }
+
+  /**
+   * Constructs the payload for creating a ticket.
+   *
+   * Codebase wants ids, not names, and requires a status and a priority, so
+   * names are resolved and missing ones fall back to the project's defaults.
+   *
+   * @param string $project
+   *   The project permalink.
+   * @param array $args
+   *   The tool arguments.
+   *
+   * @return array
+   *   The payload for the Codebase API.
+   *
+   * @throws \Exception If a value cannot be resolved.
+   */
+  private function buildTicketCreatePayload(string $project, array $args): array {
+    $summary = trim((string) ($args['summary'] ?? ''));
+    if ($summary === '') {
+      throw new \Exception('summary is required.');
+    }
+    $ticket = ['summary' => $summary];
+
+    if (!empty($args['description'])) {
+      $ticket['description'] = (string) $args['description'];
+    }
+
+    if (!empty($args['type'])) {
+      $type = strtolower((string) $args['type']);
+      if (!in_array($type, ['bug', 'enhancement', 'task'], TRUE)) {
+        throw new \Exception('type must be one of: bug, enhancement, task.');
+      }
+      $ticket['ticket_type'] = $type;
+    }
+
+    $ticket['status_id'] = !empty($args['status'])
+      ? $this->findPropertyIdByName("/{$project}/tickets/statuses", (string) $args['status'])
+      : $this->defaultStatusId($project);
+    $ticket['priority_id'] = !empty($args['priority'])
+      ? $this->findPropertyIdByName("/{$project}/tickets/priorities", (string) $args['priority'])
+      : $this->defaultPriorityId($project);
+
+    if (!empty($args['category'])) {
+      $ticket['category_id'] = $this->findPropertyIdByName("/{$project}/tickets/categories", (string) $args['category']);
+    }
+    if (!empty($args['assignee'])) {
+      $ticket['assignee_id'] = $this->findProjectUserId($project, (string) $args['assignee']);
+    }
+
+    return ['ticket' => $ticket];
+  }
+
+  /**
+   * The id of the project's first status that is not a closing one.
+   *
+   * @throws \Exception If the project has no usable status.
+   */
+  private function defaultStatusId(string $project): int {
+    $statuses = array_filter(
+      array_map(fn($item) => is_array($item) && count($item) === 1 ? reset($item) : $item, $this->apiGet("/{$project}/tickets/statuses")),
+      fn($status) => is_array($status) && isset($status['id']) && empty($status['treat_as_closed'])
+    );
+    if (!$statuses) {
+      throw new \Exception('Unable to determine a default status; pass status.');
+    }
+    usort($statuses, fn($a, $b) => ($a['order'] ?? PHP_INT_MAX) <=> ($b['order'] ?? PHP_INT_MAX));
+    return (int) $statuses[0]['id'];
+  }
+
+  /**
+   * The id of the project's default priority, else its first one.
+   *
+   * @throws \Exception If the project has no priorities.
+   */
+  private function defaultPriorityId(string $project): int {
+    $priorities = array_values(array_filter(
+      array_map(fn($item) => is_array($item) && count($item) === 1 ? reset($item) : $item, $this->apiGet("/{$project}/tickets/priorities")),
+      fn($priority) => is_array($priority) && isset($priority['id'])
+    ));
+    if (!$priorities) {
+      throw new \Exception('Unable to determine a default priority; pass priority.');
+    }
+    foreach ($priorities as $priority) {
+      if (!empty($priority['default'])) {
+        return (int) $priority['id'];
+      }
+    }
+    usort($priorities, fn($a, $b) => ($a['position'] ?? PHP_INT_MAX) <=> ($b['position'] ?? PHP_INT_MAX));
+    return (int) $priorities[0]['id'];
   }
 
   /**
