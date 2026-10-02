@@ -6,7 +6,8 @@ The MCP server provides the following tools:
 
 * List projects
 * Get project
-* List tickets
+* List tickets (one project, 20 per page)
+* List my tickets (across all active projects in one call)
 * Get ticket
 * Get ticket notes
 * Get ticket statuses

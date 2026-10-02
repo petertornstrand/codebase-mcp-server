@@ -11,6 +11,22 @@ namespace petertornstrand;
  */
 class CodebaseMCPServer {
 
+  /** Tools that work across projects and need no project argument. */
+  private const PROJECTLESS_TOOLS = ['list_projects', 'list_my_tickets'];
+
+  /** Most projects searched in one list_my_tickets call. */
+  private const MAX_PROJECTS = 100;
+
+  /** Codebase returns this many tickets per page. */
+  private const PAGE_SIZE = 20;
+
+  /** Most pages fetched per project in list_my_tickets. */
+  private const MAX_PAGES = 10;
+
+  private const QUERY_HELP = 'Codebase search syntax: status:open, assignee:me, priority:high, type:bug, category:name, milestone:"Release 1". Comma separate values (status:new,accepted), prefix not- to negate (not-status:completed), quote values with spaces. Terms are ANDed. sort:updated_at order:desc sorts.';
+
+  private const INSTRUCTIONS = 'Tools for Codebase HQ. Most tools work on ONE project: pass its permalink as the project argument (list_projects shows the permalinks). To find tickets across ALL of the user\'s projects, for example "what tickets do I have?" or "what is assigned to me?", call list_my_tickets once. Do not call list_tickets for each project. Ticket lists are compact summaries, 20 per page in list_tickets (may_have_more says whether to fetch the next page); use get_ticket for full detail. An empty list means the search matched nothing; projects_skipped and projects_incomplete in list_my_tickets name projects that could not be fully checked.';
+
   /**
    * Initializes the Codebase MCP Server.
    *
@@ -22,12 +38,18 @@ class CodebaseMCPServer {
    *   The short name/permalink of the project.
    * @param ?string $baseUrl
    *   The API base URL.
+   * @param float $timeLimit
+   *   Seconds allowed for searches that span all projects.
+   * @param int $concurrency
+   *   Requests in flight at once for searches that span all projects.
    */
   public function __construct(
     private string $username,
     private string $apiKey,
     private ?string $project = null,
     private ?string $baseUrl = null,
+    private float $timeLimit = 20.0,
+    private int $concurrency = 8,
   ) {
     // If no environment variable for API base URL is set use a default.
     if (!is_null($baseUrl)) {
@@ -89,7 +111,7 @@ class CodebaseMCPServer {
     $id = $request['id'];
 
     try {
-      if ($method === 'tools/call' && ($params['name'] ?? '') !== 'list_projects') {
+      if ($method === 'tools/call' && !in_array($params['name'] ?? '', self::PROJECTLESS_TOOLS, TRUE)) {
         if (is_null($project)) {
           throw new \Exception('Missing required argument: project. Either set environment variable CODEBASE_PROJECT or pass argument to tool.');
         }
@@ -156,7 +178,8 @@ class CodebaseMCPServer {
       'serverInfo' => [
         'name' => 'codebase-hq-mcp-server',
         'version' => '1.0.1',
-      ]
+      ],
+      'instructions' => self::INSTRUCTIONS,
     ];
   }
 
@@ -171,7 +194,7 @@ class CodebaseMCPServer {
       'tools' => [
         [
           'name' => 'list_projects',
-          'description' => 'List projects',
+          'description' => 'List the projects the user can access, with the permalinks that other tools take as their project argument. To find tickets across projects, use list_my_tickets instead of searching each project.',
           'inputSchema' => [
             'type' => 'object',
             'properties' => (object)[],
@@ -189,12 +212,24 @@ class CodebaseMCPServer {
         ],
         [
           'name' => 'list_tickets',
-          'description' => 'List tickets in the project',
+          'description' => 'List tickets in ONE project as compact summaries, 20 per page (use get_ticket for full detail). may_have_more is true when a full page was returned: request the next page. An empty list means nothing matched. To search all of the user\'s projects at once, use list_my_tickets. ' . self::QUERY_HELP,
           'inputSchema' => [
             'type' => 'object',
             'properties' => [
               'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
-              'query' => ['type' => 'string', 'description' => 'Search query (e.g., status:open, assignee:username, priority:high).'],
+              'query' => ['type' => 'string', 'description' => 'Search query (default: status:open), e.g. assignee:me priority:high.'],
+              'page' => ['type' => 'integer', 'minimum' => 1, 'description' => 'Page number, starting at 1 (20 tickets per page).'],
+            ],
+          ],
+        ],
+        [
+          'name' => 'list_my_tickets',
+          'description' => 'Find tickets across ALL of the user\'s active projects in one call. Defaults to the user\'s open tickets (assignee:me status:open). Use this for questions such as "what tickets do I have?" instead of calling list_tickets per project. Projects are searched in parallel and extra pages are fetched automatically. projects_skipped lists projects that could not be checked and why; projects_incomplete lists projects where only some tickets were returned. Returns compact summaries; use get_ticket for full detail. ' . self::QUERY_HELP,
+          'inputSchema' => [
+            'type' => 'object',
+            'properties' => [
+              'query' => ['type' => 'string', 'description' => 'Search query applied to every project (default: assignee:me status:open).'],
+              'projects' => ['type' => 'array', 'items' => ['type' => 'string'], 'description' => 'Optional project permalinks to search instead of all active projects.'],
             ],
           ],
         ],
@@ -355,7 +390,8 @@ class CodebaseMCPServer {
     $content = match ($name) {
       'list_projects' => $this->apiGet("/projects"),
       'get_project' => $this->apiGet("/{$project}"),
-      'list_tickets' => $this->listTickets($project, $args['query'] ?? 'status:open'),
+      'list_tickets' => $this->listTicketsPage($project, $args),
+      'list_my_tickets' => $this->listMyTickets($args),
       'get_ticket' => $this->apiGet("/{$project}/tickets/{$args['ticket_id']}"),
       'get_ticket_notes' => $this->apiGet("/{$project}/tickets/{$args['ticket_id']}/notes"),
       'get_ticket_statuses' => $this->apiGet("/{$project}/tickets/statuses"),
@@ -374,9 +410,39 @@ class CodebaseMCPServer {
       'content' => [
         [
           'type' => 'text',
-          'text' => json_encode($content, JSON_PRETTY_PRINT),
+          // Compact and unescaped: pretty printing and \\uXXXX escapes cost tokens.
+          'text' => json_encode($content, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE),
         ],
       ],
+    ];
+  }
+
+  /**
+   * One page of a ticket search in a single project, as compact summaries.
+   *
+   * @param array $args
+   *   Optional query and page.
+   *
+   * @return array
+   *   The page, how many tickets it holds and whether more may follow.
+   *
+   * @throws \Exception If the arguments are invalid or the search fails.
+   */
+  private function listTicketsPage(string $project, array $args): array {
+    $page = $args['page'] ?? 1;
+    if (!is_scalar($page) || !preg_match('/^[1-9]\d{0,3}$/', (string) $page)) {
+      throw new \Exception('Invalid page.');
+    }
+    $page = (int) $page;
+    $query = isset($args['query']) && is_string($args['query']) && trim($args['query']) !== '' ? trim($args['query']) : 'status:open';
+
+    $tickets = TicketFormatter::compactList($this->listTickets($project, $query, $page));
+    return [
+      'page' => $page,
+      'count' => count($tickets),
+      // A full page may be followed by another; a short one is the last.
+      'may_have_more' => count($tickets) >= self::PAGE_SIZE,
+      'tickets' => $tickets,
     ];
   }
 
@@ -384,17 +450,19 @@ class CodebaseMCPServer {
    * Searches tickets, treating "no matches" as an empty list.
    *
    * Codebase answers a search without results with 404 and an empty list.
-   * That is only an empty result if the project itself exists, so check it
-   * before swallowing the error.
+   * On the first page that is only an empty result if the project itself
+   * exists, so check it before swallowing the error. Past the last page a
+   * 404 simply means there is nothing more.
    *
    * @return array
    *   The matching tickets.
    *
    * @throws \Exception If the search or the project lookup fails.
    */
-  private function listTickets(string $project, string $query): array {
+  private function listTickets(string $project, string $query, int $page = 1): array {
+    $params = ['query' => $query] + ($page > 1 ? ['page' => $page] : []);
     try {
-      return $this->apiGet("/{$project}/tickets", ['query' => $query]);
+      return $this->apiGet("/{$project}/tickets", $params);
     }
     catch (CodebaseApiException $e) {
       if ($e->status !== 404) {
@@ -402,9 +470,204 @@ class CodebaseMCPServer {
       }
     }
 
+    if ($page > 1) {
+      return [];
+    }
     // Throws the explicit "not found" error if the project does not exist.
     $this->apiGet("/{$project}");
     return [];
+  }
+
+  /**
+   * Searches tickets across all (or the given) projects in parallel.
+   *
+   * Projects are searched in rounds, one page each, so a project with more
+   * than a page of matches is followed up without holding back the others.
+   * All rounds share one time limit.
+   *
+   * @param array $args
+   *   Optional query and projects.
+   *
+   * @return array
+   *   The tickets found, how many projects were searched, and the projects
+   *   that could not be checked, or only partly, with the reason.
+   *
+   * @throws \Exception If the arguments are invalid or the project list fails.
+   */
+  private function listMyTickets(array $args): array {
+    $query = isset($args['query']) && is_string($args['query']) && trim($args['query']) !== ''
+      ? trim($args['query'])
+      : 'assignee:me status:open';
+    // Only queries for open tickets can be narrowed by the open ticket count.
+    $openOnly = (bool) preg_match('/(^|\s)status:open(\s|$)/', $query);
+
+    $skipped = [];
+    $explicit = isset($args['projects']);
+    $withoutOpen = 0;
+    if ($explicit) {
+      if (!is_array($args['projects'])) {
+        throw new \Exception('projects must be a list of project permalinks.');
+      }
+      foreach ($args['projects'] as $permalink) {
+        if (!is_string($permalink) || !preg_match('/^[A-Za-z0-9_-]+$/', $permalink)) {
+          throw new \Exception('Invalid project permalink in projects.');
+        }
+      }
+      $permalinks = array_values(array_unique($args['projects']));
+    }
+    else {
+      $permalinks = [];
+      foreach ($this->activeProjects($this->apiGet('/projects')) as $project) {
+        if ($openOnly && $project['open_tickets'] === 0) {
+          $withoutOpen++;
+        }
+        else {
+          $permalinks[] = $project['permalink'];
+        }
+      }
+    }
+
+    if (count($permalinks) > self::MAX_PROJECTS) {
+      foreach (array_slice($permalinks, self::MAX_PROJECTS) as $permalink) {
+        $skipped[] = ['project' => $permalink, 'reason' => 'Not checked: more than ' . self::MAX_PROJECTS . ' projects.'];
+      }
+      $permalinks = array_slice($permalinks, 0, self::MAX_PROJECTS);
+    }
+
+    $deadline = microtime(TRUE) + $this->timeLimit;
+    $tickets = [];
+    $incomplete = [];
+    $checked = 0;
+    $found = array_fill_keys($permalinks, 0);
+    // Project => the page to fetch next.
+    $round = array_fill_keys($permalinks, 1);
+
+    while ($round) {
+      $remaining = $deadline - microtime(TRUE);
+      $paths = [];
+      foreach ($round as $permalink => $page) {
+        $paths[$permalink] = "/{$permalink}/tickets.json?" . http_build_query(['query' => $query] + ($page > 1 ? ['page' => $page] : []));
+      }
+      $fetcher = new ParallelFetcher($this->baseUrl, $this->username, $this->apiKey, $this->concurrency, max(0.0, $remaining));
+      $next = [];
+
+      foreach ($fetcher->get($paths) as $permalink => $result) {
+        $page = $round[$permalink];
+        $failure = $result['error']
+          ?? ($result['status'] >= 400 && $result['status'] !== 404
+            ? $this->apiError($result['status'], "/{$permalink}/tickets", (string) $result['body'])->getMessage()
+            : NULL);
+
+        if ($failure !== NULL) {
+          // Nothing from this project, or only the pages before this one.
+          if ($page === 1) {
+            $skipped[] = ['project' => $permalink, 'reason' => $failure];
+          }
+          else {
+            $incomplete[] = ['project' => $permalink, 'tickets_returned' => $found[$permalink], 'reason' => $failure];
+          }
+          continue;
+        }
+
+        if ($page === 1) {
+          $checked++;
+        }
+
+        if ($result['status'] === 404) {
+          // Codebase's answer to a search without matches (or past the last
+          // page). For projects we were told to search, confirm they exist.
+          if ($explicit && $page === 1) {
+            try {
+              $this->apiGet("/{$permalink}");
+            }
+            catch (\Exception $e) {
+              $checked--;
+              $skipped[] = ['project' => $permalink, 'reason' => $e->getMessage()];
+            }
+          }
+          continue;
+        }
+
+        $list = json_decode((string) $result['body'], TRUE);
+        if (!is_array($list) || !array_is_list($list)) {
+          if ($page === 1) {
+            $checked--;
+            $skipped[] = ['project' => $permalink, 'reason' => 'Unexpected response from Codebase.'];
+          }
+          else {
+            $incomplete[] = ['project' => $permalink, 'tickets_returned' => $found[$permalink], 'reason' => 'Unexpected response from Codebase.'];
+          }
+          continue;
+        }
+
+        foreach (TicketFormatter::compactList($list, $permalink) as $ticket) {
+          $tickets[] = $ticket;
+        }
+        $found[$permalink] += count($list);
+
+        if (count($list) >= self::PAGE_SIZE) {
+          if ($page >= self::MAX_PAGES) {
+            $incomplete[] = ['project' => $permalink, 'tickets_returned' => $found[$permalink], 'reason' => 'More matches exist; stopped after ' . self::MAX_PAGES . ' pages. Narrow the query or use list_tickets with page.'];
+          }
+          else {
+            $next[$permalink] = $page + 1;
+          }
+        }
+      }
+      $round = $next;
+
+      // Out of time with pages still to fetch: say so for each project.
+      if ($round && $deadline - microtime(TRUE) <= 0.05) {
+        foreach ($round as $permalink => $page) {
+          $incomplete[] = ['project' => $permalink, 'tickets_returned' => $found[$permalink], 'reason' => 'Time limit reached; more pages not fetched.'];
+        }
+        break;
+      }
+    }
+
+    return [
+      'query' => $query,
+      'projects_checked' => $checked,
+      'projects_without_open_tickets' => $withoutOpen,
+      'ticket_count' => count($tickets),
+      'tickets' => $tickets,
+      'projects_skipped' => $skipped,
+      'projects_incomplete' => $incomplete,
+    ];
+  }
+
+  /**
+   * Extracts the active projects from the project list.
+   *
+   * @param array $projects
+   *   The decoded response of the projects endpoint.
+   *
+   * @return array<int, array{permalink: string, open_tickets: ?int}>
+   *   Archived projects are left out. open_tickets is NULL if not reported.
+   */
+  private function activeProjects(array $projects): array {
+    $active = [];
+    $seen = [];
+    foreach ($projects as $item) {
+      $project = is_array($item) && isset($item['project']) && is_array($item['project']) ? $item['project'] : $item;
+      if (!is_array($project) || !isset($project['permalink']) || !preg_match('/^[A-Za-z0-9_-]+$/', (string) $project['permalink'])) {
+        continue;
+      }
+      $status = strtolower((string) ($project['status'] ?? ''));
+      if (!empty($project['archived']) || in_array($status, ['archived', 'inactive', 'closed'], TRUE)) {
+        continue;
+      }
+      $permalink = (string) $project['permalink'];
+      if (isset($seen[$permalink])) {
+        continue;
+      }
+      $seen[$permalink] = TRUE;
+      $active[] = [
+        'permalink' => $permalink,
+        'open_tickets' => isset($project['open_tickets']) && is_numeric($project['open_tickets']) ? (int) $project['open_tickets'] : NULL,
+      ];
+    }
+    return $active;
   }
 
   /**

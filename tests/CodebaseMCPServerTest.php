@@ -90,7 +90,7 @@ class CodebaseMCPServerTest extends TestCase {
   public function testToolsListDescribesEveryTool(): void {
     $tools = $this->rpc($this->server(), 'tools/list')['result']['tools'];
     $names = array_column($tools, 'name');
-    $this->assertCount(14, $names);
+    $this->assertCount(15, $names);
     $this->assertSame($names, array_values(array_unique($names)));
     foreach ($tools as $tool) {
       $this->assertNotSame('', $tool['description'], $tool['name']);
@@ -264,6 +264,217 @@ class CodebaseMCPServerTest extends TestCase {
     $this->assertEmpty(array_filter(self::$api->requests(), fn($r) => $r['method'] === 'POST'));
   }
 
+  // Cross-project search.
+
+  /** Requests the fake API got for ticket searches, keyed by project. */
+  private function searches(): array {
+    $found = [];
+    foreach (self::$api->requests() as $request) {
+      if (preg_match('#^/([^/]+)/tickets\.json$#', $request['path'], $m) && $request['method'] === 'GET') {
+        $found[$m[1]] = $request;
+      }
+    }
+    return $found;
+  }
+
+  public function testListMyTicketsSearchesEveryActiveProjectWithoutAProject(): void {
+    $result = $this->payload($this->call($this->server(), 'list_my_tickets'));
+
+    $this->assertSame('assignee:me status:open', $result['query']);
+    $byProject = [];
+    foreach ($result['tickets'] as $ticket) {
+      $byProject[$ticket['project']][] = $ticket['id'];
+    }
+    $this->assertSame([12, 13], $byProject['acme']);
+    $this->assertSame([7], $byProject['beta']);
+
+    // Archived, malformed and (for an open-only query) ticket-free projects
+    // are never searched.
+    $searched = array_keys($this->searches());
+    sort($searched);
+    $this->assertSame(['acme', 'beta', 'broken', 'endless', 'many', 'quiet', 'weird'], $searched);
+    $this->assertSame(1, $result['projects_without_open_tickets']);
+    foreach ($this->searches() as $request) {
+      $this->assertSame('assignee:me status:open', $request['query']['query']);
+      $this->assertSame(['acme/peter', 'good-key'], [$request['user'], $request['pass']]);
+    }
+  }
+
+  public function testListMyTicketsReportsWhatItCouldNotCheck(): void {
+    $result = $this->payload($this->call($this->server(), 'list_my_tickets'));
+
+    $skipped = array_column($result['projects_skipped'], 'reason', 'project');
+    $this->assertEqualsCanonicalizing(['broken', 'weird'], array_keys($skipped));
+    $this->assertStringContainsString('(500)', $skipped['broken']);
+    $this->assertSame('Unexpected response from Codebase.', $skipped['weird']);
+
+    // A search without matches is not a failure, and is not skipped.
+    $this->assertArrayNotHasKey('quiet', $skipped);
+    $this->assertSame(5, $result['projects_checked'], 'acme, beta, quiet, many and endless');
+    // The project list already proved it exists: no extra lookup.
+    $this->assertNotContains('/quiet.json', array_column(self::$api->requests(), 'path'));
+  }
+
+  public function testListMyTicketsOutputIsCompact(): void {
+    $response = $this->call($this->server(), 'list_my_tickets', ['projects' => ['acme']]);
+    $text = $response['result']['content'][0]['text'];
+
+    $first = json_decode($text, TRUE)['tickets'][0];
+    $this->assertSame([
+      'project' => 'acme', 'id' => 12, 'summary' => 'Fix login', 'type' => 'bug', 'status' => 'In Progress',
+      'priority' => 'High', 'assignee' => 'peter', 'milestone' => 'Rel 1', 'updated_at' => '2026-10-01T10:00:00Z',
+    ], $first);
+    $this->assertStringNotContainsString('description', $text);
+    $this->assertStringNotContainsString("\n", $text, 'not pretty printed');
+    $this->assertStringContainsString('Åäö på svenska', $text);
+    $this->assertStringNotContainsString('\\u00', $text, 'unicode is not escaped');
+  }
+
+  public function testListMyTicketsPassesACustomQuery(): void {
+    $this->call($this->server(), 'list_my_tickets', ['query' => '  priority:high  ']);
+    $this->assertSame('priority:high', $this->searches()['acme']['query']['query']);
+
+    self::$api->reset();
+    $this->call($this->server(), 'list_my_tickets', ['query' => '   ']);
+    $this->assertSame('assignee:me status:open', $this->searches()['acme']['query']['query'], 'blank falls back to the default');
+  }
+
+  #[DataProvider('queriesThatCannotSkipEmptyProjects')]
+  public function testProjectsWithoutOpenTicketsAreOnlySkippedForOpenOnlyQueries(string $query): void {
+    $result = $this->payload($this->call($this->server(), 'list_my_tickets', ['query' => $query]));
+    $this->assertArrayHasKey('idle', $this->searches(), "$query must search the project with no open tickets");
+    $this->assertSame(0, $result['projects_without_open_tickets']);
+  }
+
+  public static function queriesThatCannotSkipEmptyProjects(): array {
+    return [
+      'closed tickets' => ['status:closed assignee:me'],
+      'any status' => ['assignee:me'],
+      'open or new' => ['status:open,new'],
+      'not open' => ['not-status:open'],
+    ];
+  }
+
+  public function testExplicitProjectsAreNeverSkippedForHavingNoOpenTickets(): void {
+    $this->call($this->server(), 'list_my_tickets', ['projects' => ['idle']]);
+    $this->assertArrayHasKey('idle', $this->searches());
+  }
+
+  public function testListMyTicketsFollowsAdditionalPages(): void {
+    $result = $this->payload($this->call($this->server(), 'list_my_tickets', ['projects' => ['many']]));
+    $this->assertSame(45, $result['ticket_count']);
+    $ids = array_column($result['tickets'], 'id');
+    $this->assertSame(range(1000, 1044), $ids, 'every ticket, once, in order');
+    $this->assertSame([], $result['projects_incomplete']);
+
+    $pages = array_map(fn($r) => (int) ($r['query']['page'] ?? 1), array_values(array_filter(self::$api->requests(), fn($r) => $r['path'] === '/many/tickets.json')));
+    sort($pages);
+    $this->assertSame([1, 2, 3], $pages, 'stops after the first short page');
+  }
+
+  public function testListMyTicketsStopsAtThePageLimitAndSaysSo(): void {
+    $result = $this->payload($this->call($this->server(), 'list_my_tickets', ['projects' => ['endless', 'acme']]));
+    $this->assertSame([['project' => 'endless', 'tickets_returned' => 200,
+      'reason' => 'More matches exist; stopped after 10 pages. Narrow the query or use list_tickets with page.']], $result['projects_incomplete']);
+    $this->assertSame(202, $result['ticket_count'], '10 full pages plus the other project');
+    $this->assertCount(10, array_filter(self::$api->requests(), fn($r) => $r['path'] === '/endless/tickets.json'));
+  }
+
+  public function testOtherProjectsAreNotHeldBackByALongOne(): void {
+    $result = $this->payload($this->call($this->server(), 'list_my_tickets', ['projects' => ['endless', 'beta']]));
+    $this->assertContains(7, array_column($result['tickets'], 'id'));
+  }
+
+  public function testListMyTicketsCanBeLimitedToGivenProjects(): void {
+    $result = $this->payload($this->call($this->server(), 'list_my_tickets', ['projects' => ['beta', 'beta', 'acme']]));
+    $this->assertSame(3, $result['ticket_count']);
+    $this->assertEqualsCanonicalizing(['acme', 'beta'], array_keys($this->searches()));
+    $this->assertNotContains('/projects.json', array_column(self::$api->requests(), 'path'), 'no project list needed');
+    $this->assertCount(2, $this->searches(), 'duplicates are searched once');
+  }
+
+  public function testExplicitProjectsAreCheckedForExistence(): void {
+    $result = $this->payload($this->call($this->server(), 'list_my_tickets', ['projects' => ['quiet', 'missing']]));
+    $this->assertSame(0, $result['ticket_count']);
+
+    // "quiet" exists and simply has no matches; "missing" does not exist.
+    $this->assertSame(['missing'], array_column($result['projects_skipped'], 'project'));
+    $this->assertStringContainsString('was not found', $result['projects_skipped'][0]['reason']);
+    $this->assertContains('/quiet.json', array_column(self::$api->requests(), 'path'));
+  }
+
+  public function testListMyTicketsValidatesProjects(): void {
+    foreach ([['../x'], ['a b'], [5], ['ok', '']] as $projects) {
+      $this->assertSame('Invalid project permalink in projects.', $this->error($this->call($this->server(), 'list_my_tickets', ['projects' => $projects])));
+    }
+    $this->assertSame('projects must be a list of project permalinks.', $this->error($this->call($this->server(), 'list_my_tickets', ['projects' => 'acme'])));
+    $this->assertSame([], self::$api->requests());
+  }
+
+  public function testListMyTicketsCapsTheNumberOfProjects(): void {
+    $projects = array_map(fn($i) => "p$i", range(1, 101));
+    $result = $this->payload($this->call($this->server(), 'list_my_tickets', ['projects' => $projects]));
+    $this->assertCount(100, $this->searches());
+    $this->assertContains(['project' => 'p101', 'reason' => 'Not checked: more than 100 projects.'], $result['projects_skipped']);
+  }
+
+  public function testListMyTicketsStopsAtTheTimeLimit(): void {
+    // One request at a time, so 'acme' cannot be queued behind 'slow'.
+    $server = new CodebaseMCPServer('acme/peter', 'good-key', NULL, self::$api->url, 1.0, 1);
+    $start = microtime(TRUE);
+    $result = $this->payload($this->call($server, 'list_my_tickets', ['projects' => ['acme', 'slow']]));
+    $this->assertLessThan(2.5, microtime(TRUE) - $start);
+
+    $this->assertSame(2, $result['ticket_count'], 'finished projects are still returned');
+    $this->assertSame(['slow'], array_column($result['projects_skipped'], 'project'));
+    $this->assertSame(1, $result['projects_checked']);
+  }
+
+  public function testListMyTicketsSurfacesAuthenticationFailure(): void {
+    $this->assertStringContainsString('(401)', $this->error($this->call($this->server(key: 'wrong'), 'list_my_tickets')));
+  }
+
+  public function testListTicketsReturnsCompactSummaries(): void {
+    $result = $this->payload($this->call($this->server(), 'list_tickets', ['project' => 'acme']));
+    $this->assertSame(['page' => 1, 'count' => 2, 'may_have_more' => FALSE], array_diff_key($result, ['tickets' => 1]));
+
+    $tickets = $result['tickets'];
+    $this->assertSame([12, 13], array_column($tickets, 'id'));
+    $this->assertArrayNotHasKey('description', $tickets[0]);
+    $this->assertArrayNotHasKey('project', $tickets[0], 'single project searches do not repeat the project');
+    $this->assertSame(['id' => 12, 'summary' => 'Fix login', 'type' => 'bug', 'status' => 'In Progress', 'priority' => 'High',
+      'assignee' => 'peter', 'milestone' => 'Rel 1', 'updated_at' => '2026-10-01T10:00:00Z'], $tickets[0]);
+  }
+
+  public function testGetTicketKeepsFullDetail(): void {
+    $this->call($this->server(), 'get_ticket', ['project' => 'acme', 'ticket_id' => 12]);
+    $this->assertSame('/acme/tickets/12.json', self::$api->requests()[0]['path']);
+  }
+
+  // Guidance for clients.
+
+  public function testInitializeGivesInstructionsThatPointToTheCrossProjectTool(): void {
+    $instructions = $this->rpc($this->server(), 'initialize')['result']['instructions'];
+    $this->assertStringContainsString('list_my_tickets', $instructions);
+    $this->assertStringContainsString('Do not call list_tickets for each project', $instructions);
+  }
+
+  public function testToolDescriptionsSteerTowardsTheRightTool(): void {
+    $tools = array_column($this->rpc($this->server(), 'tools/list')['result']['tools'], NULL, 'name');
+    $this->assertStringContainsString('ONE project', $tools['list_tickets']['description']);
+    $this->assertStringContainsString('list_my_tickets', $tools['list_tickets']['description']);
+    $this->assertStringContainsString('list_my_tickets', $tools['list_projects']['description']);
+    $this->assertStringContainsString('ALL', $tools['list_my_tickets']['description']);
+    $this->assertSame('array', $tools['list_my_tickets']['inputSchema']['properties']['projects']['type']);
+    foreach (['list_tickets', 'list_my_tickets'] as $tool) {
+      $this->assertStringContainsString('assignee:me', $tools[$tool]['description']);
+      $this->assertStringContainsString('not-status:completed', $tools[$tool]['description']);
+    }
+    $this->assertStringContainsString('may_have_more', $tools['list_tickets']['description']);
+    $this->assertSame('integer', $tools['list_tickets']['inputSchema']['properties']['page']['type']);
+    $this->assertArrayNotHasKey('required', $tools['list_my_tickets']['inputSchema']);
+  }
+
   // Errors.
 
   public function testUnknownToolIsAnError(): void {
@@ -282,9 +493,39 @@ class CodebaseMCPServerTest extends TestCase {
 
   public function testSearchWithoutMatchesIsAnEmptyListNotAnError(): void {
     $result = $this->payload($this->call($this->server(), 'list_tickets', ['project' => 'quiet', 'query' => 'assignee:me status:open']));
-    $this->assertSame([], $result);
+    $this->assertSame(['page' => 1, 'count' => 0, 'may_have_more' => FALSE, 'tickets' => []], $result);
     // It confirmed the project exists before treating the 404 as empty.
     $this->assertSame(['/quiet/tickets.json', '/quiet.json'], array_column(self::$api->requests(), 'path'));
+  }
+
+  public function testListTicketsPaginates(): void {
+    $server = $this->server();
+    $first = $this->payload($this->call($server, 'list_tickets', ['project' => 'many']));
+    $this->assertSame([1, 20, TRUE], [$first['page'], $first['count'], $first['may_have_more']]);
+
+    $third = $this->payload($this->call($server, 'list_tickets', ['project' => 'many', 'page' => 3]));
+    $this->assertSame([3, 5, FALSE], [$third['page'], $third['count'], $third['may_have_more']]);
+    $this->assertSame(1040, $third['tickets'][0]['id'], 'page 3 starts at ticket 41');
+
+    $requests = self::$api->requests();
+    $this->assertArrayNotHasKey('page', $requests[0]['query'], 'the first page is the default');
+    $this->assertSame('3', $requests[1]['query']['page']);
+  }
+
+  public function testPastTheLastPageIsEmptyWithoutProjectLookup(): void {
+    $result = $this->payload($this->call($this->server(), 'list_tickets', ['project' => 'many', 'page' => 4]));
+    $this->assertSame(['page' => 4, 'count' => 0, 'may_have_more' => FALSE, 'tickets' => []], $result);
+    $this->assertSame(['/many/tickets.json'], array_column(self::$api->requests(), 'path'), 'no extra lookup past the end');
+  }
+
+  #[DataProvider('badPages')]
+  public function testListTicketsRejectsInvalidPages(mixed $page): void {
+    $this->assertSame('Invalid page.', $this->error($this->call($this->server(), 'list_tickets', ['project' => 'many', 'page' => $page])));
+    $this->assertSame([], self::$api->requests());
+  }
+
+  public static function badPages(): array {
+    return [[0], [-1], ['abc'], ['1.5'], [[2]], [100000], ['2 ']];
   }
 
   public function testSearchInAMissingProjectIsAnExplicitError(): void {
