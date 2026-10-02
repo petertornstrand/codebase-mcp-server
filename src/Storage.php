@@ -162,11 +162,17 @@ class Storage {
    */
   public function rateLimit(string $key, int $limit, int $window): bool {
     $now = time();
-    $this->db->prepare('INSERT INTO rate_limits VALUES (?, ?, 1)
+    // Values must be bound as integers: as text they compare greater than any
+    // integer expression in SQLite, which would reset the window every time.
+    $stmt = $this->db->prepare('INSERT INTO rate_limits VALUES (:key, :now, 1)
       ON CONFLICT(key) DO UPDATE SET
-        hits = CASE WHEN window_start + ? <= ? THEN 1 ELSE hits + 1 END,
-        window_start = CASE WHEN window_start + ? <= ? THEN ? ELSE window_start END')
-      ->execute([$key, $now, $window, $now, $window, $now, $now]);
+        hits = CASE WHEN window_start + :window <= :now THEN 1 ELSE hits + 1 END,
+        window_start = CASE WHEN window_start + :window <= :now THEN :now ELSE window_start END');
+    $stmt->bindValue(':key', $key);
+    $stmt->bindValue(':now', $now, \PDO::PARAM_INT);
+    $stmt->bindValue(':window', $window, \PDO::PARAM_INT);
+    $stmt->execute();
+
     $stmt = $this->db->prepare('SELECT hits FROM rate_limits WHERE key = ?');
     $stmt->execute([$key]);
     return (int) $stmt->fetchColumn() <= $limit;
