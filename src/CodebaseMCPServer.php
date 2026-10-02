@@ -114,6 +114,15 @@ class CodebaseMCPServer {
         'result' => $result,
       ];
     } catch (\Exception $e) {
+      if ($method === 'tools/call') {
+        // Never log credentials; the message only holds API status and path.
+        error_log(sprintf(
+          'Tool call failed: tool=%s project=%s error=%s',
+          $params['name'] ?? '-',
+          $project ?? '-',
+          substr(preg_replace('/\s+/', ' ', $e->getMessage()), 0, 300)
+        ));
+      }
       return [
         'jsonrpc' => '2.0',
         'id' => $id,
