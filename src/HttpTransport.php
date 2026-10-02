@@ -23,12 +23,15 @@ class HttpTransport {
    *   any other Origin header are rejected (DNS rebinding protection).
    * @param ?string $apiUrl
    *   Optional Codebase API base URL override.
+   * @param bool $allowDestructive
+   *   Whether tools that remove access or data are offered. Off by default.
    */
   public function __construct(
     private $authenticate,
     private string $resourceMetadataUrl,
     private array $allowedOrigins = [],
     private ?string $apiUrl = null,
+    private bool $allowDestructive = false,
   ) {}
 
   /**
@@ -71,7 +74,7 @@ class HttpTransport {
       return $this->rpcError(-32700, 'Parse error.');
     }
 
-    $server = new CodebaseMCPServer($credentials['username'], $credentials['api_key'], null, $this->apiUrl);
+    $server = new CodebaseMCPServer($credentials['username'], $credentials['api_key'], null, $this->apiUrl, allowDestructive: $this->allowDestructive);
 
     // A JSON array of messages is a batch; an object is a single message.
     $isBatch = array_is_list($message);

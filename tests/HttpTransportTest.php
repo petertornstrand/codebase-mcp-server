@@ -24,11 +24,11 @@ class HttpTransportTest extends TestCase {
     $this->seenTokens = [];
   }
 
-  private function transport(array $origins = []): HttpTransport {
+  private function transport(array $origins = [], bool $allowDestructive = FALSE): HttpTransport {
     return new HttpTransport(function (string $token): ?array {
       $this->seenTokens[] = $token;
       return $token === 'good-token' ? ['username' => 'acme/peter', 'api_key' => 'good-key'] : NULL;
-    }, self::METADATA, $origins, self::$api->url);
+    }, self::METADATA, $origins, self::$api->url, $allowDestructive);
   }
 
   private function post(array|string $message, array $headers = [], ?HttpTransport $transport = NULL): array {
@@ -185,6 +185,29 @@ class HttpTransportTest extends TestCase {
     // A different token on the next request must not reuse earlier credentials.
     $this->assertSame(200, $this->post(self::rpc('ping'))['status']);
     $this->assertSame(401, $this->post(self::rpc('ping'), ['authorization' => 'Bearer other'])['status']);
+  }
+
+  public function testDestructiveToolsFollowTheSetting(): void {
+    $names = fn(HttpTransport $t) => array_column($this->json($this->post(self::rpc('tools/list'), [], $t))['result']['tools'], 'name');
+    $this->assertNotContains('unassign_from_projects', $names($this->transport()), 'off by default');
+    $this->assertNotContains('unassign_from_projects', $names($this->transport(allowDestructive: FALSE)));
+    $this->assertContains('unassign_from_projects', $names($this->transport(allowDestructive: TRUE)));
+  }
+
+  public function testATransportBuiltWithoutTheSettingOffersNoDestructiveTools(): void {
+    // The default itself must be safe, not only what callers pass in.
+    $bare = new HttpTransport(fn() => ['username' => 'acme/peter', 'api_key' => 'good-key'], self::METADATA);
+    $res = $this->post(self::rpc('tools/list'), [], $bare);
+    $this->assertNotContains('unassign_from_projects', array_column($this->json($res)['result']['tools'], 'name'));
+
+    $call = $this->post(self::rpc('tools/call', 2, ['name' => 'unassign_from_projects', 'arguments' => ['projects' => ['x'], 'confirm' => TRUE]]), [], $bare);
+    $this->assertStringContainsString('is disabled', $this->json($call)['error']['message']);
+  }
+
+  public function testACallToADisabledToolIsRefusedOverHttp(): void {
+    $res = $this->post(self::rpc('tools/call', 4, ['name' => 'unassign_from_projects', 'arguments' => ['projects' => ['ia-inactive'], 'confirm' => TRUE]]));
+    $this->assertStringContainsString('is disabled', $this->json($res)['error']['message']);
+    $this->assertSame([], self::$api->requests());
   }
 
 }

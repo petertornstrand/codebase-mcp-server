@@ -2,6 +2,7 @@
 
 namespace petertornstrand\Tests;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use petertornstrand\App;
 
@@ -15,6 +16,8 @@ class OAuthFlowTest extends TestCase {
 
   private App $app;
 
+  private string $key;
+
   private string $dir;
 
   /** Credentials the fake Codebase accepts. */
@@ -23,13 +26,24 @@ class OAuthFlowTest extends TestCase {
   protected function setUp(): void {
     $this->idp = new TestIdp();
     $this->dir = sys_get_temp_dir() . '/mcp-test-' . bin2hex(random_bytes(4));
-    $this->app = new App([
+    $this->key = base64_encode(random_bytes(32));
+    $this->app = $this->makeApp();
+  }
+
+  /**
+   * An app for this test's fake identity provider and data directory.
+   *
+   * @param array $extra
+   *   Extra configuration, such as allow_destructive.
+   */
+  private function makeApp(array $extra = []): App {
+    return new App([
       'base_url' => self::BASE,
       'data_dir' => $this->dir,
-      'encryption_key' => base64_encode(random_bytes(32)),
+      'encryption_key' => $this->key,
       'allowed_domain' => 'happiness.se',
       'saml' => ['entity_id' => $this->idp->entityId, 'sso_url' => $this->idp->ssoUrl, 'cert' => $this->idp->cert],
-    ], function (string $username, string $apiKey): void {
+    ] + $extra, function (string $username, string $apiKey): void {
       if (($this->validCredentials[$username] ?? NULL) !== $apiKey) {
         throw new \Exception('rejected');
       }
@@ -485,6 +499,59 @@ class OAuthFlowTest extends TestCase {
     parse_str(parse_url($location, PHP_URL_QUERY), $result);
     $this->assertSame('1', $result['existing']);
     $this->assertSame('a b&c', $result['state'], 'state must survive encoding unchanged');
+  }
+
+  // The allow_destructive setting.
+
+  /** The names of the tools the signed-in user is offered. */
+  private function offeredTools(): array {
+    $tokens = $this->fullFlow();
+    return array_column($this->body($this->mcp($tokens['access_token']))['result']['tools'], 'name');
+  }
+
+  public function testDestructiveToolsAreOffWhenTheSettingIsMissing(): void {
+    $tools = $this->offeredTools();
+    $this->assertNotContains('unassign_from_projects', $tools);
+    $this->assertContains('find_inactive_projects', $tools);
+  }
+
+  #[DataProvider('settingsThatKeepDestructiveToolsOff')]
+  public function testDestructiveToolsStayOffForFalseOrNull(mixed $value): void {
+    $this->app = $this->makeApp(['allow_destructive' => $value]);
+    $this->assertNotContains('unassign_from_projects', $this->offeredTools());
+  }
+
+  public static function settingsThatKeepDestructiveToolsOff(): array {
+    return [[FALSE], [NULL]];
+  }
+
+  public function testDestructiveToolsCanBeSwitchedOnInTheConfig(): void {
+    $this->app = $this->makeApp(['allow_destructive' => TRUE]);
+    $this->assertContains('unassign_from_projects', $this->offeredTools());
+  }
+
+  public function testACallIsRefusedWhenTheSettingIsOff(): void {
+    $tokens = $this->fullFlow();
+    $res = $this->req('POST', '/mcp', [
+      'headers' => ['authorization' => 'Bearer ' . $tokens['access_token']],
+      'body' => json_encode(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/call', 'params' => [
+        'name' => 'unassign_from_projects', 'arguments' => ['projects' => ['x'], 'confirm' => TRUE],
+      ]]),
+    ]);
+    $this->assertStringContainsString('is disabled', $this->body($res)['error']['message']);
+  }
+
+  #[DataProvider('settingsThatAreNotBooleans')]
+  public function testTheSettingMustBeARealBoolean(mixed $value): void {
+    // A string such as 'false' is truthy in PHP, which would switch the tools
+    // on by mistake. Anything that is not true or false is a config error.
+    $this->expectException(\InvalidArgumentException::class);
+    $this->expectExceptionMessage('allow_destructive must be true or false.');
+    $this->makeApp(['allow_destructive' => $value]);
+  }
+
+  public static function settingsThatAreNotBooleans(): array {
+    return [['false'], ['true'], ['no'], ['yes'], ['0'], ['1'], [0], [1], [[]], [['true']]];
   }
 
 }
