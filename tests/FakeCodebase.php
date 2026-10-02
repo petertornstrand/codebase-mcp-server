@@ -4,6 +4,11 @@ namespace petertornstrand\Tests;
 
 /**
  * Runs the fake Codebase API on a local port and records the requests it gets.
+ *
+ * Uses several workers, but PHP's built-in server may queue connections
+ * behind one worker, so tests must not depend on how requests overlap. To
+ * measure concurrency use BarrierServer; around slow endpoints, send one
+ * request at a time.
  */
 class FakeCodebase {
 
@@ -26,7 +31,7 @@ class FakeCodebase {
       [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
       $pipes,
       NULL,
-      ['FAKE_LOG' => $this->log, 'PATH' => getenv('PATH')],
+      ['FAKE_LOG' => $this->log, 'PATH' => getenv('PATH'), 'PHP_CLI_SERVER_WORKERS' => '8'],
     );
 
     for ($i = 0; $i < 100; $i++) {
