@@ -228,14 +228,24 @@ class CodebaseMCPServerTest extends TestCase {
 
   public function testCreateTicketResolvesNamesToIds(): void {
     $this->call($this->server(), 'create_ticket', [
-      'project' => 'acme', 'summary' => 'x', 'type' => 'Enhancement', 'status' => 'in progress', 'priority' => 'HIGH',
+      'project' => 'acme', 'summary' => 'x', 'type' => 'enhancement', 'status' => 'in progress', 'priority' => 'HIGH',
       'category' => 'bug', 'assignee' => 'Peter Tornstrand',
     ]);
     $post = array_values(array_filter(self::$api->requests(), fn($r) => $r['method'] === 'POST'))[0];
     $this->assertSame([
-      'summary' => 'x', 'ticket_type' => 'enhancement', 'status_id' => 12, 'priority_id' => 20,
+      'summary' => 'x', 'ticket_type' => 'Enhancement', 'status_id' => 12, 'priority_id' => 20,
       'category_id' => 30, 'assignee_id' => 5,
     ], $post['body']['ticket']);
+  }
+
+  public function testCreateTicketAcceptsTheProjectsOwnTicketTypes(): void {
+    // Types are defined per project; Swedish letters and any case must work.
+    foreach (['sälj' => 'Sälj', 'SÄLJ' => 'Sälj', ' task ' => 'Task'] as $given => $stored) {
+      self::$api->reset();
+      $this->call($this->server(), 'create_ticket', ['project' => 'acme', 'summary' => 'x', 'type' => $given]);
+      $post = array_values(array_filter(self::$api->requests(), fn($r) => $r['method'] === 'POST'))[0];
+      $this->assertSame($stored, $post['body']['ticket']['ticket_type'], "given '$given'");
+    }
   }
 
   public function testUpdateTicketChangesTheSubjectNotTheSummary(): void {
@@ -249,7 +259,7 @@ class CodebaseMCPServerTest extends TestCase {
     $server = $this->server();
     $this->assertSame('summary is required.', $this->error($this->call($server, 'create_ticket', ['project' => 'acme', 'summary' => '   '])));
     $this->assertSame('summary is required.', $this->error($this->call($server, 'create_ticket', ['project' => 'acme'])));
-    $this->assertStringContainsString('type must be one of', $this->error($this->call($server, 'create_ticket', ['project' => 'acme', 'summary' => 'x', 'type' => 'story'])));
+    $this->assertStringContainsString('Unable to find property "story" in /acme/tickets/types', $this->error($this->call($server, 'create_ticket', ['project' => 'acme', 'summary' => 'x', 'type' => 'story'])));
     $this->assertStringContainsString('Unable to find property "Nope"', $this->error($this->call($server, 'create_ticket', ['project' => 'acme', 'summary' => 'x', 'status' => 'Nope'])));
     $this->assertStringContainsString('Multiple project users matched', $this->error($this->call($server, 'create_ticket', ['project' => 'acme', 'summary' => 'x', 'assignee' => 'Anna Andersson'])));
     $this->assertEmpty(array_filter(self::$api->requests(), fn($r) => $r['method'] === 'POST'), 'nothing is created on a bad request');
@@ -506,7 +516,9 @@ class CodebaseMCPServerTest extends TestCase {
     }
     $this->assertStringContainsString('may_have_more', $tools['list_tickets']['description']);
     $this->assertSame('integer', $tools['list_tickets']['inputSchema']['properties']['page']['type']);
-    $this->assertSame(['bug', 'enhancement', 'task'], $tools['create_ticket']['inputSchema']['properties']['type']['enum']);
+    $type = $tools['create_ticket']['inputSchema']['properties']['type'];
+    $this->assertSame('string', $type['type']);
+    $this->assertArrayNotHasKey('enum', $type, 'projects define their own ticket types');
     $this->assertArrayNotHasKey('required', $tools['list_my_tickets']['inputSchema']);
   }
 

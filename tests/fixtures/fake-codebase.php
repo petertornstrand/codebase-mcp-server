@@ -107,6 +107,12 @@ $lists = [
     ['ticketing_priority' => ['id' => 21, 'name' => 'Normal', 'colour' => '#ff0', 'default' => TRUE, 'position' => 2]],
     ['ticketing_priority' => ['id' => 22, 'name' => 'Low', 'colour' => '#0ff', 'default' => FALSE, 'position' => 1]],
   ],
+  '/acme/tickets/types.json' => [
+    ['ticketing_type' => ['id' => 1, 'name' => 'Bug', 'icon' => 'bug']],
+    ['ticketing_type' => ['id' => 2, 'name' => 'Enhancement', 'icon' => 'star']],
+    ['ticketing_type' => ['id' => 3, 'name' => 'Task', 'icon' => 'task']],
+    ['ticketing_type' => ['id' => 4, 'name' => 'Sälj', 'icon' => 'cash']],
+  ],
   '/acme/tickets/categories.json' => [['ticketing_category' => ['id' => 30, 'name' => 'Bug']]],
   '/acme/assignments.json' => [
     ['user' => ['company' => 'Acme', 'first_name' => 'Peter', 'last_name' => 'Tornstrand', 'id' => 5, 'username' => 'peter', 'email_address' => 'p@acme.test']],

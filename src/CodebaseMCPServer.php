@@ -306,7 +306,7 @@ class CodebaseMCPServer {
               'project' => ['type' => 'string', 'description' => 'The project permalink (e.g., my-project).'],
               'summary' => ['type' => 'string', 'description' => 'The title of the ticket'],
               'description' => ['type' => 'string', 'description' => 'The detailed description of the ticket'],
-              'type' => ['type' => 'string', 'enum' => ['bug', 'enhancement', 'task'], 'description' => 'Ticket type'],
+              'type' => ['type' => 'string', 'description' => 'Ticket type name as defined in the project (e.g., Bug, Enhancement, Task).'],
               'status' => ['type' => 'string', 'description' => 'Status name (e.g., New, Open). Defaults to the project\'s first open status.'],
               'priority' => ['type' => 'string', 'description' => 'Priority name (e.g., Low, Normal, High). Defaults to the project\'s default priority.'],
               'category' => ['type' => 'string', 'description' => 'Category name'],
@@ -699,11 +699,8 @@ class CodebaseMCPServer {
     }
 
     if (!empty($args['type'])) {
-      $type = strtolower((string) $args['type']);
-      if (!in_array($type, ['bug', 'enhancement', 'task'], TRUE)) {
-        throw new \Exception('type must be one of: bug, enhancement, task.');
-      }
-      $ticket['ticket_type'] = $type;
+      // Projects define their own types (Bug, Support, ...): use Codebase's spelling.
+      $ticket['ticket_type'] = $this->findProperty("/{$project}/tickets/types", (string) $args['type'])['name'];
     }
 
     $ticket['status_id'] = !empty($args['status'])
@@ -816,17 +813,26 @@ class CodebaseMCPServer {
   /**
    * Helper to find the internal ID of a property (status, priority, etc.) by its name.
    *
-   * @param string $path
-   *   The API path to fetch the list of properties.
-   * @param string $name
-   *   The name to search for.
-   *
-   * @return int
-   *   The ID of the found property.
-   *
    * @throws \Exception If the property cannot be found.
    */
   private function findPropertyIdByName(string $path, string $name): int {
+    return (int) $this->findProperty($path, $name)['id'];
+  }
+
+  /**
+   * Helper to find a property (status, priority, type, ...) by its name.
+   *
+   * @param string $path
+   *   The API path to fetch the list of properties.
+   * @param string $name
+   *   The name to search for, case-insensitively.
+   *
+   * @return array
+   *   The property, with at least id and name.
+   *
+   * @throws \Exception If the property cannot be found.
+   */
+  private function findProperty(string $path, string $name): array {
     $items = $this->apiGet($path);
 
     foreach ($items as $item) {
@@ -834,10 +840,10 @@ class CodebaseMCPServer {
       if (
         is_array($property)
         && isset($property['name'])
-        && strcasecmp((string) $property['name'], $name) === 0
+        && mb_strtolower((string) $property['name']) === mb_strtolower(trim($name))
         && isset($property['id'])
       ) {
-        return (int) $property['id'];
+        return $property;
       }
     }
 
