@@ -569,6 +569,23 @@ class CodebaseMCPServer {
   }
 
   /**
+   * Builds the exception for a failed Codebase API call.
+   *
+   * A bare 404 is ambiguous (missing project, no access, or an empty search),
+   * so say what was not found. Callers that know an empty result is possible
+   * handle the 404 themselves.
+   */
+  private function apiError(int $status, string $path, string $response): CodebaseApiException {
+    if ($status === 404) {
+      return new CodebaseApiException(sprintf(
+        'Codebase API error (404): %s was not found. The project may not exist, may have no ticket tracker enabled, or your Codebase account may not have access to it.',
+        $path
+      ), $status);
+    }
+    return new CodebaseApiException(sprintf('Codebase API error (%s): %s', $status, $response), $status);
+  }
+
+  /**
    * Performs a GET request to the Codebase API.
    *
    * @param string $path
@@ -605,7 +622,7 @@ class CodebaseMCPServer {
     $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
     if ($status >= 400) {
-      throw new \Exception(sprintf('Codebase API error (%s): %s', $status, $response));
+      throw $this->apiError($status, $path, (string) $response);
     }
 
     curl_close($ch);
@@ -653,7 +670,7 @@ class CodebaseMCPServer {
     $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
     if ($status >= 400) {
-      throw new \Exception(sprintf('Codebase API error (%s): %s', $status, $response));
+      throw $this->apiError($status, $path, (string) $response);
     }
 
     curl_close($ch);
