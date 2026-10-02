@@ -39,6 +39,15 @@ class CodebaseMCPServer {
   }
 
   /**
+   * Checks that Codebase accepts the configured credentials.
+   *
+   * @throws \Exception If the credentials are rejected or the API is unreachable.
+   */
+  public function verifyCredentials(): void {
+    $this->apiGet('/projects');
+  }
+
+  /**
    * Main loop to handle MCP requests from stdin and respond to stdout.
    *
    * Listens for JSON-RPC messages and dispatches them to handleRequest.
@@ -49,35 +58,51 @@ class CodebaseMCPServer {
       $request = json_decode($line, true);
       if (!$request) continue;
 
-      $response = $this->handleRequest($request);
-      echo json_encode($response) . "\n";
+      $response = $this->handle($request);
+      if ($response !== null) {
+        echo json_encode($response) . "\n";
+      }
     }
   }
 
   /**
-   * Handles an incoming MCP/JSON-RPC request.
+   * Handles an incoming MCP/JSON-RPC message.
+   *
+   * Transport independent; used by both the stdio loop and the HTTP endpoint.
    *
    * @param array $request
    *   The decoded JSON request.
    *
-   * @return array
-   *   The JSON-RPC response array.
+   * @return array|null
+   *   The JSON-RPC response array, or NULL for notifications (messages without
+   *   an id), which must not be answered.
    */
-  private function handleRequest(array $request): array {
+  public function handle(array $request): ?array {
+    if (!array_key_exists('id', $request)) {
+      return null;
+    }
+
     $method = $request['method'] ?? '';
-    $params = $request['params'] ?? [];
-    $project = $params['project'] ?? $this->project;
-    $id = $request['id'] ?? null;
+    $params = is_array($request['params'] ?? null) ? $request['params'] : [];
+    $arguments = is_array($params['arguments'] ?? null) ? $params['arguments'] : [];
+    $project = $arguments['project'] ?? $params['project'] ?? $this->project;
+    $id = $request['id'];
 
     try {
-      if ($params['name'] !== 'list_projects' && is_null($project)) {
-        throw new \Exception('Missing required argument: project. Either set environment variable CODEBASE_PROJECT or pass argument to tool.');
+      if ($method === 'tools/call' && ($params['name'] ?? '') !== 'list_projects') {
+        if (is_null($project)) {
+          throw new \Exception('Missing required argument: project. Either set environment variable CODEBASE_PROJECT or pass argument to tool.');
+        }
+        if (!preg_match('/^[A-Za-z0-9_-]+$/', (string) $project)) {
+          throw new \Exception('Invalid project permalink.');
+        }
       }
 
       $result = match ($method) {
-        'initialize' => $this->initialize(),
+        'initialize' => $this->initialize((string) ($params['protocolVersion'] ?? '')),
+        'ping' => (object) [],
         'tools/list' => $this->listTools(),
-        'tools/call' => $this->callTool($project, $params['name'] ?? '', $params['arguments'] ?? []),
+        'tools/call' => $this->callTool((string) ($project ?? ''), $params['name'] ?? '', $arguments),
         'resources/list' => $this->listResources(),
         'resources/read' => $this->readResource($params['uri'] ?? ''),
         default => throw new \Exception(sprintf('Method not found: %s', $method)),
@@ -105,12 +130,16 @@ class CodebaseMCPServer {
    *
    * Provides server information and capabilities (tools and resources).
    *
+   * @param string $requestedVersion
+   *   The protocol version requested by the client.
+   *
    * @return array
    *   Initial server metadata.
    */
-  private function initialize(): array {
+  private function initialize(string $requestedVersion): array {
+    $supported = ['2025-06-18', '2025-03-26', '2024-11-05'];
     return [
-      'protocolVersion' => '2024-11-05',
+      'protocolVersion' => in_array($requestedVersion, $supported, true) ? $requestedVersion : $supported[0],
       'capabilities' => [
         'tools' => (object)[],
         'resources' => (object)[],
@@ -307,6 +336,13 @@ class CodebaseMCPServer {
    * @throws \Exception If the tool name is unknown.
    */
   private function callTool(string $project, string $name, array $args): array {
+    if (str_contains($name, 'ticket') && isset($args['ticket_id'])) {
+      if (!preg_match('/^\d+$/', (string) $args['ticket_id'])) {
+        throw new \Exception('Invalid ticket_id.');
+      }
+      $args['ticket_id'] = (int) $args['ticket_id'];
+    }
+
     $content = match ($name) {
       'list_projects' => $this->apiGet("/projects"),
       'get_project' => $this->apiGet("/{$project}"),
@@ -553,6 +589,8 @@ class CodebaseMCPServer {
 
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
     curl_setopt($ch, CURLOPT_USERPWD, "$this->username:$this->apiKey");
     curl_setopt($ch, CURLOPT_HTTPHEADER, ['Accept: application/json']);
 
@@ -593,6 +631,8 @@ class CodebaseMCPServer {
     $payload = json_encode($data);
 
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
     curl_setopt($ch, CURLOPT_USERPWD, "$this->username:$this->apiKey");
